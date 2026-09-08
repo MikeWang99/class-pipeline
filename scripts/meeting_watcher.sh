@@ -287,6 +287,11 @@ start_recording() {
     notify_throttled "no-input" "检测到开会但无可用音频输入：请授权麦克风（系统设置→隐私与安全性→麦克风，打开 PhysicsClassWatcher），录音将在下次检测重试"
     return 1
   fi
+  # Route meeting output before opening the capture stream. Starting ffmpeg
+  # first can leave the session recording only the microphone when the output
+  # switch takes effect a moment later.
+  bash "$SCRIPT_DIR/setup_audio.sh" activate >> "$LOG" 2>&1 || \
+    log "WARNING: meeting output routing unavailable; student audio may be missing"
   SESSION="$RECORD_DIR/sessions/$(date '+%Y-%m-%d_%H%M%S')"
   MATCH_RETRY_STAMP=0
   mkdir -p "$SESSION"
@@ -304,8 +309,6 @@ start_recording() {
   # take several minutes, so relying only on a post-class lookup is fragile.
   lock_course_match "$SESSION" || true
   MATCH_RETRY_STAMP=$(date +%s)
-  # route system output through the multi-output device if available
-  bash "$SCRIPT_DIR/setup_audio.sh" activate >> "$LOG" 2>&1 || true
 }
 
 stop_recording() {
@@ -322,9 +325,30 @@ transcribe_session() {
   local dir="$1"
   local match="" sys="" stu="" archive_file="" material_file="" matched="no"
   [ -f "$dir/audio.wav" ] || { log "no audio.wav in $dir"; return; }
-  # skip if already transcribed or previously failed (prevent retry storm)
-  [ -f "$dir/transcript.txt" ] && { log "already transcribed: $dir"; delete_audio_after_transcript "$dir" || true; return; }
-  [ -f "$dir/.transcribe_failed" ] && { log "skipping previously failed: $dir"; return; }
+  # A completed transcript still needs to pass identity, quality, and AI
+  # completion checks before its source audio can be removed.
+  if [ -f "$dir/transcript.txt" ]; then
+    log "already transcribed: $dir"
+    if [ -f "$dir/retain_audio" ]; then
+      log "audio retained by session marker: $dir"
+    else
+      log "audio retained until formal feedback completion: $dir"
+    fi
+    return
+  fi
+  # A failed attempt must not permanently quarantine a session. Retry after a
+  # short cooldown so transient network/model failures recover automatically.
+  if [ -f "$dir/.transcribe_failed" ]; then
+    local failed_at now
+    failed_at=$(stat -f%m "$dir/.transcribe_failed" 2>/dev/null || echo 0)
+    now=$(date +%s)
+    if [ "$failed_at" -gt 0 ] && [ $((now - failed_at)) -lt 900 ]; then
+      log "skipping failed transcription during cooldown: $dir"
+      return
+    fi
+    log "retrying previously failed transcription: $dir"
+    unlink "$dir/.transcribe_failed" 2>/dev/null || true
+  fi
   local size
   size=$(stat -f%z "$dir/audio.wav" 2>/dev/null || echo 0)
   if [ "$size" -lt 100000 ]; then log "audio too small ($size bytes), skipping transcription"; notify "skip" "录音文件过小，跳过转写"; return; fi
@@ -350,14 +374,18 @@ transcribe_session() {
     fi
     archive_file="$(archive_transcript "$dir" "$sys" "$stu" "$matched")"
     log "archived transcript to $archive_file"
-    delete_audio_after_transcript "$dir" || true
     # 无论日历是否临时可用都创建待 AI 队列，避免一次匹配失败截断课后链路。
     if [ "$matched" = "yes" ]; then
       if material_file=$(bash "$SCRIPT_DIR/postclass_generate.sh" "$dir" "$VAULT_PATH" "$sys" "$stu" 2>> "$LOG"); then
         printf '%s\n' "$material_file" >> "$LOG"
-        bash "$SCRIPT_DIR/trigger_postclass_ai.sh" "$dir" "$material_file" >> "$LOG" 2>&1 || \
-          log "WARNING: failed to launch post-class AI trigger (session=$dir)"
-        notify "done" "转写完成，文字稿已归档，Codex 正在生成正式反馈并更新档案"
+        if grep -q '^status: 待人工确认录音$' "$material_file"; then
+          log "post-class AI withheld: transcript quality unusable (session=$dir)"
+          notify "done" "转写完成，但录音内容无法辨认，暂未生成正式反馈"
+        else
+          bash "$SCRIPT_DIR/trigger_postclass_ai.sh" "$dir" "$material_file" >> "$LOG" 2>&1 || \
+            log "WARNING: failed to launch post-class AI trigger (session=$dir)"
+          notify "done" "转写完成，文字稿已归档，Codex 正在生成正式反馈并更新档案"
+        fi
       else
         RC=$?
         if [ "$RC" -eq 2 ]; then
@@ -370,9 +398,14 @@ transcribe_session() {
       if material_file=$(bash "$SCRIPT_DIR/postclass_generate.sh" "$dir" "$VAULT_PATH" 2>> "$LOG"); then
         printf '%s\n' "$material_file" >> "$LOG"
         log "calendar match unavailable; queued transcript for AI reconciliation: $dir"
-        bash "$SCRIPT_DIR/trigger_postclass_ai.sh" "$dir" "$material_file" >> "$LOG" 2>&1 || \
-          log "WARNING: failed to launch post-class AI trigger (session=$dir)"
-        notify "done" "转写完成，文字稿已归档；Codex 正在重试识别课程并生成反馈"
+        if grep -q '^status: 待人工确认录音$' "$material_file"; then
+          log "post-class AI withheld: transcript quality unusable (session=$dir)"
+          notify "done" "转写完成，但录音内容无法辨认，暂未生成正式反馈"
+        else
+          bash "$SCRIPT_DIR/trigger_postclass_ai.sh" "$dir" "$material_file" >> "$LOG" 2>&1 || \
+            log "WARNING: failed to launch post-class AI trigger (session=$dir)"
+          notify "done" "转写完成，文字稿已归档；Codex 正在重试识别课程并生成反馈"
+        fi
       else
         notify "done" "转写完成 ✅（待处理任务创建失败，查看日志）"
       fi

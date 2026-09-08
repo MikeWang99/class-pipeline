@@ -98,6 +98,19 @@ else
 fi
 TRANSCRIPT_SNIPPET=$( { sed -n '1,100p' "$TRANSCRIPT"; printf '\n…（中段省略）…\n'; tail -n 60 "$TRANSCRIPT"; } )
 
+# A non-empty transcript can still be unusable when Whisper only hears room
+# noise or emits labels such as "multiple voices". Do not send that material
+# to the writing model and do not let the cleanup step discard the only useful
+# recovery source.
+meaningful_line_count=$(sed -E 's/^\[[^]]+\][[:space:]]*//' "$TRANSCRIPT" \
+  | grep -Eiv '^,?[[:space:]]*\(?doorbell rings\)?$|^,?[[:space:]]*\(?door opens\)?$|^\(?speaking in foreign language\)?$|^\(?multiple voices\)?$|^\[[[:space:]]*No Audible Dialogue[[:space:]]*\]$|^,$' \
+  | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+TRANSCRIPT_QUALITY="usable"
+if [ "${meaningful_line_count:-0}" -lt 3 ]; then
+  TRANSCRIPT_QUALITY="unusable_for_lesson_feedback"
+  MATERIAL_STATUS="待人工确认录音"
+fi
+
 cat > "$OUTFILE" <<EOF
 ---
 date: $DATE
@@ -105,6 +118,7 @@ student: $STUDENT
 system: $SYSTEM
 status: $MATERIAL_STATUS
 calendar_match_status: $MATCH_STATUS
+transcript_quality: $TRANSCRIPT_QUALITY
 source_transcript: $TRANSCRIPT_ARCHIVE
 source_profile: ${PROFILE:-（未匹配到学生档案）}
 source_previous_feedback: ${PREV_FILE:-（无）}
@@ -127,6 +141,9 @@ ${PREV_FEEDBACK:-（无历史记录）}
 
 ## 课堂文字稿摘录
 ${TRANSCRIPT_SNIPPET}
+
+## 转写质量检查
+$(if [ "$TRANSCRIPT_QUALITY" = "usable" ]; then echo "转写包含可用于课堂分析的有效内容。"; else echo "自动转写主要由环境声或无法辨认的占位标签组成，暂不生成正式反馈；请先确认录音输入链路。"; fi)
 
 ## 1. 本节课内容
 > 待装有该 Skill 的 AI 根据完整课堂文字稿补全

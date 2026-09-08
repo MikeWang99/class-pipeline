@@ -5,7 +5,7 @@
 #   1. dependency check (brew / ffmpeg / python3 / swift)
 #   2. install BlackHole 2ch virtual audio device + create multi-output device
 #   3. detect Obsidian vault (search common locations, take first .obsidian dir)
-#   4. check GROQ_API_KEY
+#   4. check optional GROQ_API_KEY (local Whisper is the fallback)
 #   5. write config.json
 #   6. register two launchd jobs: daily pre-class scan + resident meeting watcher
 #   7. link the skill into ~/.qoder/skills and ~/.codex/skills
@@ -101,14 +101,14 @@ else
   ok "Vault: $VAULT"
 fi
 
-# ---------- 4. GROQ key ----------
-step "4/7 GROQ_API_KEY 检查"
+# ---------- 4. transcription backends ----------
+step "4/7 转写后端检查"
 if [ -n "${GROQ_API_KEY:-}" ]; then
   ok "环境变量已设置"
 elif grep -q "GROQ_API_KEY" "$HOME/.zshrc" 2>/dev/null; then
   ok "已在 ~/.zshrc 中找到（转写脚本会自动读取）"
 else
-  warn "未找到 GROQ_API_KEY。转写功能需要它：https://console.groq.com/keys 免费申请后写入 ~/.zshrc"
+  warn "未找到 GROQ_API_KEY。Groq 将被跳过，转写会自动使用本地 Whisper；如需 Groq，可稍后写入 ~/.zshrc"
 fi
 
 # ---------- 5. config.json ----------
