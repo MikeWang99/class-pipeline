@@ -104,4 +104,4 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 | 转写报 Forbidden | Groq 的当前项目/密钥没有权限或受网络区域限制；脚本会先读取 macOS 系统代理，仍失败时自动切到本地 Whisper。只有明确设置 `TRANSCRIBE_BACKEND=groq` 才会在 Groq 失败时停止 |
 | 文字稿只有环境声或占位标签 | 反馈素材会标记为“待人工确认录音”，不会调用 AI 生成反馈，也不会删除原始音频；先检查 BlackHole / 多输出设备和会议 App 的扬声器设置 |
 | 定时任务没跑 | `launchctl list \| grep physicsclass` 确认任务在；plist 在 `~/Library/LaunchAgents/` |
-| 明明 UI 里有 Google 日历事件，但脚本没扫到 | 先确认系统“日历”权限已给 PhysicsClassScanner；新版会重试 EventKit，并在课后优先回退到备课笔记里的 `event_start` 元数据做匹配 |
+| 明明 UI 里有 Google 日历事件，但脚本没扫到 | 先确认系统“日历”权限已给 PhysicsClassScanner；查询脚本会重试 EventKit，并使用后台 AppleScript 读取 Calendar 数据，课后再优先回退到备课笔记里的 `event_start` 元数据做匹配；不会为了刷新权限主动打开 Calendar 窗口 |

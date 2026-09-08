@@ -25,10 +25,6 @@ while [ "$attempt" -le 3 ]; do
     fi
   fi
 
-  if printf '%s' "$output" | grep -qi "calendar access denied"; then
-    /usr/bin/open -gj -a Calendar >/dev/null 2>&1 || true
-  fi
-
   if [ "$attempt" -lt 3 ]; then
     sleep 2
   fi
