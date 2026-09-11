@@ -3,7 +3,7 @@
 #
 # Loops every 15s. When a meeting app is detected it starts recording
 # (BlackHole + microphone). When the meeting has been gone for 3 consecutive
-# checks (~45s) it stops recording, transcribes via Groq Whisper, prepares
+# checks (~45s) it stops recording, transcribes via local Whisper Turbo, prepares
 # transcript/feedback draft materials, and posts a macOS notification.
 #
 # Usage:
@@ -31,6 +31,11 @@ fi
 RECORD_DIR="$(cfg recordings_dir "$HOME/physics-class-pipeline-data")"
 VAULT_PATH="$(cfg vault_path "$HOME/Obsidian Vault")"
 RECORD_DIR="${RECORD_DIR/#\~/$HOME}"
+WHISPER_MODEL_CFG="$(cfg whisper_model "")"
+if [ -n "$WHISPER_MODEL_CFG" ]; then
+  export WHISPER_MODEL="${WHISPER_MODEL_CFG/#\~/$HOME}"
+fi
+export TRANSCRIBE_LANGUAGE="$(cfg transcribe_language "auto")"
 LOG_DIR="$RECORD_DIR/logs"
 mkdir -p "$RECORD_DIR/sessions" "$LOG_DIR"
 LOG="$LOG_DIR/watcher.log"
@@ -361,10 +366,7 @@ transcribe_session() {
   size=$(stat -f%z "$dir/audio.wav" 2>/dev/null || echo 0)
   if [ "$size" -lt 100000 ]; then log "audio too small ($size bytes), skipping transcription"; notify "skip" "录音文件过小，跳过转写"; return; fi
   notify "transcribing" "会议结束，录音已停止，正在转写文字稿…"
-  # pick up GROQ_API_KEY from user shell config if not in env
-  if [ -z "${GROQ_API_KEY:-}" ] && [ -f "$HOME/.zshrc" ]; then
-    export GROQ_API_KEY="$(grep -E '^[[:space:]]*(export[[:space:]]+)?GROQ_API_KEY=' "$HOME/.zshrc" | tail -1 | sed -E 's/^[^=]*=[[:space:]]*//; s/^["'\'']+//; s/["'\'']+$//')"
-  fi
+  # Transcription is intentionally local-only; no API key is loaded here.
   if python3 "$SCRIPT_DIR/transcribe_audio.py" "$dir/audio.wav" "$dir" >> "$LOG" 2>&1; then
     if [ -s "$dir/calendar_match.txt" ]; then
       match=$(sed -n '1p' "$dir/calendar_match.txt")

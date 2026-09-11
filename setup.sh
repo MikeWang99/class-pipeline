@@ -5,7 +5,7 @@
 #   1. dependency check (brew / ffmpeg / python3 / swift)
 #   2. install BlackHole 2ch virtual audio device + create multi-output device
 #   3. detect Obsidian vault (search common locations, take first .obsidian dir)
-#   4. check optional GROQ_API_KEY (local Whisper is the fallback)
+#   4. check the local Whisper Turbo model
 #   5. write config.json
 #   6. register two launchd jobs: daily pre-class scan + resident meeting watcher
 #   7. link the skill into ~/.qoder/skills and ~/.codex/skills
@@ -101,20 +101,20 @@ else
   ok "Vault: $VAULT"
 fi
 
-# ---------- 4. transcription backends ----------
-step "4/7 转写后端检查"
-if [ -n "${GROQ_API_KEY:-}" ]; then
-  ok "环境变量已设置"
-elif grep -q "GROQ_API_KEY" "$HOME/.zshrc" 2>/dev/null; then
-  ok "已在 ~/.zshrc 中找到（转写脚本会自动读取）"
+# ---------- 4. local transcription model ----------
+step "4/7 本地转写模型检查"
+WHISPER_MODEL_PATH="${WHISPER_MODEL:-$HOME/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin}"
+if [ -f "$WHISPER_MODEL_PATH" ]; then
+  ok "本地 Whisper 模型: $WHISPER_MODEL_PATH"
 else
-  warn "未找到 GROQ_API_KEY。Groq 将被跳过，转写会自动使用本地 Whisper；如需 Groq，可稍后写入 ~/.zshrc"
+  warn "未找到本地模型: $WHISPER_MODEL_PATH"
+  warn "请先下载 ggml-large-v3-turbo-q5_0.bin，再运行 setup.sh"
 fi
 
 # ---------- 5. config.json ----------
 step "5/7 写入 config.json"
 python3 - "$SKILL_DIR" "$VAULT" "$DATA_DIR" "$SCAN_HOUR" "$SCAN_MINUTE" <<'PYEOF'
-import json, sys
+import json, os, sys
 skill_dir, vault, data_dir, hour, minute = sys.argv[1:6]
 cfg = {
     "vault_path": vault,
@@ -122,6 +122,10 @@ cfg = {
     "calendar_keyword": "Class",
     "scan_hour": int(hour),
     "scan_minute": int(minute),
+    "transcribe_backend": "local",
+    "whisper_model": os.path.expanduser(os.environ.get(
+        "WHISPER_MODEL", "~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin")),
+    "transcribe_language": os.environ.get("TRANSCRIBE_LANGUAGE", "auto"),
 }
 with open(f"{skill_dir}/config.json", "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)

@@ -5,7 +5,7 @@ description: 物理教学课前/课中/课后全链路自动化。课前定时�
 
 # Physics Class Pipeline · 物理教学全链路
 
-把「课前备课 → 课中录音 → 课后反馈/档案/作业」串成一条自动化流水线。语音转写默认优先使用 Groq Whisper，遇到权限、网络或区域限制时自动切换到本地 whisper.cpp；备课内容、课后反馈、档案更新、作业建议都由当前执行该 Skill 的 AI 负责。所有产出写入 Obsidian Vault 的「上课记录」分区。
+把「课前备课 → 课中录音 → 课后反馈/档案/作业」串成一条自动化流水线。语音转写固定使用本地 whisper.cpp Turbo 模型，不调用任何远程服务或 API；备课内容、课后反馈、档案更新、作业建议都由当前执行该 Skill 的 AI 负责。所有产出写入 Obsidian Vault 的「上课记录」分区。
 
 ## 0. 通用约定
 
@@ -20,7 +20,7 @@ description: 物理教学课前/课中/课后全链路自动化。课前定时�
 - **日历事件格式**：`{体系} Class-{学生名}`，如 `CIE Class-Sujal`、`AP Class-Eden`。体系取 `Class` 前文本，学生取连字符后文本。
 - 读取配置后再干活；`config.json` 不存在时提示用户先运行 `setup.sh`。
 - 所有脚本在 `scripts/` 下，用绝对路径调用。
-- **转写后端**：`scripts/transcribe_audio.py` 支持 `TRANSCRIBE_BACKEND=auto|groq|local`，默认是 `auto`。`auto` 模式不会因 Groq 403 把课后流程卡死，而是切换到本地 Whisper。多语言课堂使用 `~/.cache/whisper-cpp/ggml-small.bin`；也可用 `WHISPER_MODEL` 指定模型路径，`TRANSCRIBE_LANGUAGE=zh`、`en` 或 `auto` 指定语言。
+- **转写后端**：`scripts/transcribe_audio.py` 固定使用本地 whisper.cpp，默认模型为 `~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin`（多语言 Q5 量化版）；也可用 `WHISPER_MODEL` 指定其他本地模型，`TRANSCRIBE_LANGUAGE=zh`、`en` 或 `auto` 指定语言。不会读取 API key，也不会联网转写。
 
 ## 1. 首次安装（闭环）
 
@@ -30,7 +30,7 @@ description: 物理教学课前/课中/课后全链路自动化。课前定时�
 bash {skill_dir}/setup.sh
 ```
 
-setup.sh 会自动完成：依赖检查（brew/ffmpeg 缺则自动装/python3/swift）→ 安装 BlackHole 虚拟声卡（需重启一次，重启后重跑 setup.sh）→ 尝试创建多输出音频设备（新系统可能失败，会提示手动替代方案，不阻塞安装）→ 探测 Obsidian Vault → 读取 GROQ_API_KEY（仅供转写使用）→ 创建后台应用 PhysicsClassWatcher/PhysicsClassScanner 并注册两个 launchd 任务（每日 10:00 课前扫描 + 常驻会议监听）→ 自动弹出系统麦克风授权窗口并等待用户点一次「允许」→ 安装 skill 到 `~/.qoder/skills` 与 `~/.codex/skills`。全程打印每一步结果。卸载用 `uninstall.sh`。
+setup.sh 会自动完成：依赖检查（brew/ffmpeg 缺则自动装/python3/swift）→ 安装 BlackHole 虚拟声卡（需重启一次，重启后重跑 setup.sh）→ 尝试创建多输出音频设备（新系统可能失败，会提示手动替代方案，不阻塞安装）→ 探测 Obsidian Vault → 检查本地 Whisper Turbo 模型 → 创建后台应用 PhysicsClassWatcher/PhysicsClassScanner 并注册两个 launchd 任务（每日 10:00 课前扫描 + 常驻会议监听）→ 自动弹出系统麦克风授权窗口并等待用户点一次「允许」→ 安装 skill 到 `~/.qoder/skills` 与 `~/.codex/skills`。全程打印每一步结果。卸载用 `uninstall.sh`。
 
 ## 2. 课前：备课内容生成
 
@@ -47,7 +47,7 @@ setup.sh 会自动完成：依赖检查（brew/ffmpeg 缺则自动装/python3/sw
    - 补全「本次课教学目标」「教学流程与时间分配」「关键题目/演示」「预判学生卡点」等章节
 4. 直接编辑该笔记文件（保持 front matter 与已填上下文不动）。
 
-这里的“补全”必须由当前装了该 Skill 的 AI 自己完成。不要调用 Groq 或其他本地脚本模型去写备课正文。
+这里的“补全”必须由当前装了该 Skill 的 AI 自己完成。不要调用任何语音转写程序或其他本地脚本模型去写备课正文。
 
 ## 3. 课中：自动录音（全自动，无需 AI 参与）
 
@@ -55,7 +55,7 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 
 - **覆盖平台**：Zoom（zoom.us）、腾讯会议（wemeetapp/xmeet）、钉钉、飞书、Google Meet（Chrome/Safari 打开 meet.google.com 标签页）
 - **检测到开课**：自动用 ffmpeg 录制 BlackHole（会议双方声音）+ 麦克风（双保险），存入 `{recordings_dir}/sessions/{YYYY-MM-DD_HHMM}/audio.wav`
-- **检测到散会**（连续 45 秒无会议进程）：停止录音 → 自动调用 Groq Whisper，失败时切换本地 Whisper 转写 → 文字稿存 `transcript.txt` → **无论是否匹配到日历，都会先把文字稿归档到 Vault 的 `课堂文字稿/`** → 创建课后反馈待处理素材并交给当前 AI；只有正式反馈和学生档案更新成功后才删除对应的 `audio.wav`（写入 `audio_deleted.txt` 删除记录），待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核
+- **检测到散会**（连续 45 秒无会议进程）：停止录音 → 使用本地 Whisper Turbo 转写 → 文字稿存 `transcript.txt` → **无论是否匹配到日历，都会先把文字稿归档到 Vault 的 `课堂文字稿/`** → 创建课后反馈待处理素材并交给当前 AI；只有正式反馈和学生档案更新成功后才删除对应的 `audio.wav`（写入 `audio_deleted.txt` 删除记录），待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核
 - **课程身份锁定**：开课时立即按 session 时间匹配日历；若 EventKit 或 iCloud 当时短暂不可用，录音期间每 60 秒重试，直到将 `{SYSTEM}|{STUDENT}` 写入 `calendar_match.txt`
 
 用户无需任何手动操作。若用户说「开始上课/手动录音」，可直接运行 `bash {skill_dir}/scripts/meeting_watcher.sh once` 强制走一轮录音+转写。
@@ -74,7 +74,7 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 
 **AI 生成部分**：用户说「生成反馈」「精修反馈」「更新档案」时，AI 读取 `课后反馈草稿/` 里的素材稿、课堂文字稿与学生档案，按本 skill 内置规范 `docs/feedback-spec.md` 生成正式反馈，并写入 `{vault}/上课记录/课后反馈/{YYYY-MM-DD}-{学生}-feedback.md`，同时按规范的台账更新规则同步 `{vault}/上课记录/学生档案/{学生}.md`。也就是说，学生档案更新发生在这一步，而不是 watcher 仅靠转写就能自动完成。
 
-每天 10:00 的 Codex 定时任务保留为失败补偿与次日备课入口：扫描 `课后反馈草稿/` 中仍处于“待AI生成 / 待AI识别学生”的文件，先重试日历匹配，再由当前宿主 AI 读取完整文字稿生成正式反馈并更新档案。日历暂时不可用时保留任务，不得猜学生或标记完成。Groq Whisper 始终只负责转写，不参与正文生成。
+每天 10:00 的 Codex 定时任务保留为失败补偿与次日备课入口：扫描 `课后反馈草稿/` 中仍处于“待AI生成 / 待AI识别学生”的文件，先重试日历匹配，再由当前宿主 AI 读取完整文字稿生成正式反馈并更新档案。日历暂时不可用时保留任务，不得猜学生或标记完成。本地 Whisper 只负责转写，不参与正文生成。
 
 ## 4.1 课后反馈写作规范（内置）
 
@@ -101,8 +101,7 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 | 录音时长明显短于实际课程 | 检查 `recording_started_at.txt`、`recording_stopped_at.txt` 与 `recording_incomplete`；先修复音频路由，再重新上课，不能拿不完整录音生成反馈 |
 | 没检测到开会 | 运行 `bash scripts/meeting_watcher.sh once` 看检测日志；浏览器开 Meet 需在 Chrome/Safari 且标签页可见 |
 | 日志报 `MIC PERMISSION: missing` | 麦克风未授权：打开 系统设置→隐私与安全性→麦克风，把 PhysicsClassWatcher 打开（或重跑 setup.sh 触发弹窗） |
-| 转写失败 | 先看 `{recordings_dir}/logs/watcher.log`；默认 `auto` 会在 Groq 不可用时使用本地 Whisper。若本地模型缺失，运行 `bash {skill_dir}/setup.sh` 或设置 `WHISPER_MODEL` 指向已下载的 ggml 多语言模型 |
-| 转写报 Forbidden | Groq 的当前项目/密钥没有权限或受网络区域限制；脚本会先读取 macOS 系统代理，仍失败时自动切到本地 Whisper。只有明确设置 `TRANSCRIBE_BACKEND=groq` 才会在 Groq 失败时停止 |
+| 转写失败 | 先看 `{recordings_dir}/logs/watcher.log`；确认 `/opt/homebrew/bin/whisper-cli` 与 `~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin` 存在，或设置 `WHISPER_CLI` / `WHISPER_MODEL` 指向本地安装 |
 | 文字稿只有环境声或占位标签 | 反馈素材会标记为“待人工确认录音”，不会调用 AI 生成反馈，也不会删除原始音频；先检查 BlackHole / 多输出设备和会议 App 的扬声器设置 |
 | 定时任务没跑 | `launchctl list \| grep physicsclass` 确认任务在；plist 在 `~/Library/LaunchAgents/` |
 | 明明 UI 里有 Google 日历事件，但脚本没扫到 | 先确认系统“日历”权限已给 PhysicsClassScanner；查询脚本会重试 EventKit，并使用后台 AppleScript 读取 Calendar 数据，课后再优先回退到备课笔记里的 `event_start` 元数据做匹配；不会为了刷新权限主动打开 Calendar 窗口 |

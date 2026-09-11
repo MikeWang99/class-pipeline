@@ -5,7 +5,7 @@
 | 阶段 | 行为 | 触发方式 |
 |---|---|---|
 | 课前 | 扫描明天日历，为每节课生成备课笔记骨架（含学生档案摘要、上次反馈），由装了 Skill 的 AI 补全教学目标与流程 | launchd 每日 10:00 自动 + 说「备课」 |
-| 课中 | 检测到会议（Zoom/腾讯会议/钉钉/飞书/Google Meet）自动录音，散会后 Groq Whisper 转写全员文字稿；文字稿生成成功后自动删除原始 audio.wav | 常驻后台，全自动 |
+| 课中 | 检测到会议（Zoom/腾讯会议/钉钉/飞书/Google Meet）自动录音，散会后使用本地 Whisper large-v3-turbo 转写全员文字稿；文字稿生成成功后自动删除原始 audio.wav | 常驻后台，全自动 |
 | 课后 | 自动归档文字稿并始终保留反馈任务；日历临时不可用时等待 AI 重试识别。正式家长反馈、学生档案更新、作业建议由装了 Skill 的 AI 完成 | 后台自动 + AI 周期任务 |
 
 所有产出写入 Obsidian Vault 的「上课记录」分区：`备课内容 / 课堂文字稿 / 课后反馈 / 学生档案`。
@@ -36,7 +36,7 @@ bash setup.sh
 1. 输入一次管理员密码（安装 BlackHole 驱动时）
 2. **重启一次 Mac**（BlackHole 驱动生效必需），重启后再跑一次 `bash setup.sh`
 3. 在弹出的「访问麦克风」窗口点一次【允许】
-4. `~/.zshrc` 里有 `GROQ_API_KEY`（仅转写用，https://console.groq.com/keys 免费）
+4. 本地 Whisper Turbo 模型已下载到 `~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin`（setup 会检查）
 
 可选：想录到学生声音，在「音频 MIDI 设置」手动建一个多输出设备（扬声器+BlackHole，30 秒），或在会议 App 里把扬声器设为 BlackHole 2ch。
 
@@ -46,7 +46,7 @@ bash setup.sh
 
 - macOS（日历 / launchd / EventKit / osascript）
 - brew、ffmpeg、python3、swift（setup 会检查）
-- `GROQ_API_KEY` 环境变量（Groq Whisper 免费额度转写用，写入 `~/.zshrc`）
+- 本地 Whisper 运行时：`/opt/homebrew/bin/whisper-cli` 与 `~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin`
 - 日历事件命名：`{体系} Class-{学生名}`，如 `CIE Class-Sujal`
 
 ## 目录结构
@@ -61,10 +61,10 @@ scripts/
   meeting_watcher.sh      # 课中：会议检测 + 录音 + 转写 + 反馈草稿素材准备（launchd 常驻）
   setup_audio.sh          # BlackHole 安装/检查/激活/还原
   create_multi_output.swift  # 创建 CoreAudio 多输出设备
-  transcribe_audio.py     # Groq Whisper 转写（自动分片，无 25MB 限制）
+  transcribe_audio.py     # 本地 Whisper Turbo 转写（自动分片）
 ```
 
-录音与文字稿存放在 `~/physics-class-pipeline-data/`，日志在其 `logs/` 子目录。只有正式家长反馈和学生档案更新成功后，才会删除对应 session 的 `audio.wav`，并在同目录写入 `audio_deleted.txt` 记录删除时间、路径和释放字节数；待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核。`transcript.txt` / `transcript.json` 会保留。Groq Whisper 只负责这一步的语音转写，不负责备课内容或课后反馈正文。文字稿现在会一律归档到 Vault 的 `上课记录/课堂文字稿/`，AI 所需素材也会一律写入 `上课记录/课后反馈草稿/`。日历临时不可用时，任务会标为“待AI识别学生”并保留到后续重试，不会再静默跳过。正式家长反馈与学生档案更新仍由装了该 skill 的 AI 完成；在 Codex 中应配置周期任务来自动消费这批待处理素材。
+录音与文字稿存放在 `~/physics-class-pipeline-data/`，日志在其 `logs/` 子目录。只有正式家长反馈和学生档案更新成功后，才会删除对应 session 的 `audio.wav`，并在同目录写入 `audio_deleted.txt` 记录删除时间、路径和释放字节数；待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核。`transcript.txt` / `transcript.json` 会保留。本地 Whisper 只负责这一步的语音转写，不负责备课内容或课后反馈正文。文字稿现在会一律归档到 Vault 的 `上课记录/课堂文字稿/`，AI 所需素材也会一律写入 `上课记录/课后反馈草稿/`。日历临时不可用时，任务会标为“待AI识别学生”并保留到后续重试，不会再静默跳过。正式家长反馈与学生档案更新仍由装了该 skill 的 AI 完成；在 Codex 中应配置周期任务来自动消费这批待处理素材。
 
 开课和散会提醒同时使用通知横幅与 8 秒自动关闭的可见对话框，避免 macOS 静默抑制横幅时没有任何提示。可随时运行 `bash scripts/meeting_watcher.sh notify-test` 验证弹窗链路。
 
