@@ -97,7 +97,8 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 
 | 现象 | 处理 |
 |---|---|
-| 录音文件无声/只有单方 | 确认系统输出设备是 `PhysicsClass Multi-Output`（setup 创建）；运行 `scripts/setup_audio.sh check` |
+| 录音文件无声/只有单方 | 确认系统输出设备是 `PhysicsClass Multi-Output`（setup 创建）；运行 `scripts/setup_audio.sh check`。若 BlackHole 或多输出路由缺失，watcher 会拒绝启动不完整录音并提示修复 |
+| 录音时长明显短于实际课程 | 检查 `recording_started_at.txt`、`recording_stopped_at.txt` 与 `recording_incomplete`；先修复音频路由，再重新上课，不能拿不完整录音生成反馈 |
 | 没检测到开会 | 运行 `bash scripts/meeting_watcher.sh once` 看检测日志；浏览器开 Meet 需在 Chrome/Safari 且标签页可见 |
 | 日志报 `MIC PERMISSION: missing` | 麦克风未授权：打开 系统设置→隐私与安全性→麦克风，把 PhysicsClassWatcher 打开（或重跑 setup.sh 触发弹窗） |
 | 转写失败 | 先看 `{recordings_dir}/logs/watcher.log`；默认 `auto` 会在 Groq 不可用时使用本地 Whisper。若本地模型缺失，运行 `bash {skill_dir}/setup.sh` 或设置 `WHISPER_MODEL` 指向已下载的 ggml 多语言模型 |

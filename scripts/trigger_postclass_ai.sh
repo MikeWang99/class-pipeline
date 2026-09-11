@@ -44,6 +44,15 @@ worker() {
     -C "$SKILL_DIR" "$prompt"
   rc=$?
   if [ "$rc" -eq 0 ] && [ -s "$session_dir/ai_completed.txt" ]; then
+    # The marker is written by the AI, but the cleanup gate must independently
+    # verify the two user-facing artifacts before removing the source audio.
+    local feedback_file material_status
+    material_status=$(sed -n 's/^status: //p' "$material_file" | head -1)
+    feedback_file=$(sed -n 's/^formal_feedback: //p' "$material_file" | head -1)
+    if [ "$material_status" != "已完成" ] || [ -z "$feedback_file" ] || [ ! -s "$feedback_file" ]; then
+      log "AI marker rejected; feedback/profile completion evidence is incomplete (session=$session_dir material=$material_file)"
+      return 1
+    fi
     # Keep the source recording available while identity, transcript quality,
     # or AI generation is pending. Delete it only after the formal feedback
     # and profile update have been committed successfully.

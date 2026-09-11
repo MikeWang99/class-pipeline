@@ -227,7 +227,7 @@ archive_transcript() {
     echo "calendar_matched: $matched"
     echo "transcript_source: $dir/transcript.txt"
     echo "audio_source_original: $dir/audio.wav"
-    echo "audio_retention_policy: delete_after_transcript"
+    echo "audio_retention_policy: delete_after_formal_feedback"
     [ -f "$dir/platform.txt" ] && echo "meeting_platform: $(cat "$dir/platform.txt")"
     echo "---"
     echo
@@ -235,30 +235,6 @@ archive_transcript() {
   } > "$archive_file"
 
   printf '%s\n' "$archive_file"
-}
-
-delete_audio_after_transcript() {
-  local dir="$1"
-  local audio="$dir/audio.wav"
-  local transcript="$dir/transcript.txt"
-  [ -s "$transcript" ] || { log "audio cleanup skipped: transcript missing or empty ($dir)"; return 1; }
-  [ -f "$audio" ] || { log "audio cleanup skipped: audio already absent ($dir)"; return 0; }
-
-  local bytes deleted_at
-  bytes=$(stat -f%z "$audio" 2>/dev/null || echo 0)
-  deleted_at=$(date '+%Y-%m-%d %H:%M:%S')
-  if rm -f "$audio"; then
-    {
-      echo "deleted_at: $deleted_at"
-      echo "deleted_file: $audio"
-      echo "deleted_bytes: $bytes"
-      echo "reason: transcript generated successfully"
-    } > "$dir/audio_deleted.txt"
-    log "deleted audio after transcript (session=$dir, bytes=$bytes)"
-  else
-    log "WARNING: failed to delete audio after transcript (session=$dir)"
-    return 1
-  fi
 }
 
 start_recording() {
@@ -278,31 +254,46 @@ start_recording() {
   mic_permission
   read -r BH MIC <<< "$(audio_indices)"
   local inputs=() filters=() n=0
-  if [ "$BH" != "NONE" ]; then inputs+=(-f avfoundation -i ":$BH"); filters+=("[$n:a]"); n=$((n+1)); else log "WARNING: BlackHole not found, recording mic only"; fi
-  if [ "$MIC" != "NONE" ]; then inputs+=(-f avfoundation -i ":$MIC"); filters+=("[$n:a]"); n=$((n+1)); fi
-  if [ "$n" -eq 0 ]; then
-    log "ERROR: no audio input available (microphone permission likely missing)"
+  if [ "$BH" = "NONE" ] || [ "$MIC" = "NONE" ]; then
+    log "ERROR: incomplete audio inputs (BlackHole=$BH, microphone=$MIC); refusing to start recording"
     log "DEBUG device listing follows:"
     ffmpeg -hide_banner -f avfoundation -list_devices true -i "" >> "$LOG" 2>&1 || true
-    notify_throttled "no-input" "检测到开会但无可用音频输入：请授权麦克风（系统设置→隐私与安全性→麦克风，打开 PhysicsClassWatcher），录音将在下次检测重试"
+    notify_throttled "no-input" "检测到开会但录音链路不完整：请检查 BlackHole 和麦克风权限，未确认前不会启动不完整录音"
     return 1
   fi
   # Route meeting output before opening the capture stream. Starting ffmpeg
   # first can leave the session recording only the microphone when the output
   # switch takes effect a moment later.
-  bash "$SCRIPT_DIR/setup_audio.sh" activate >> "$LOG" 2>&1 || \
-    log "WARNING: meeting output routing unavailable; student audio may be missing"
+  if ! bash "$SCRIPT_DIR/setup_audio.sh" activate >> "$LOG" 2>&1; then
+    log "ERROR: meeting output routing unavailable; refusing to start recording without both sides of the class"
+    notify_throttled "audio-route" "检测到开会但会议音频路由未就绪：请启用 PhysicsClass Multi-Output 后再开始录音"
+    return 1
+  fi
+  inputs+=(-f avfoundation -i ":$BH"); filters+=("[$n:a]"); n=$((n+1))
+  inputs+=(-f avfoundation -i ":$MIC"); filters+=("[$n:a]"); n=$((n+1))
   SESSION="$RECORD_DIR/sessions/$(date '+%Y-%m-%d_%H%M%S')"
   MATCH_RETRY_STAMP=0
   mkdir -p "$SESSION"
   echo "$platform" > "$SESSION/platform.txt"
+  printf '%s %s\n' "$(date '+%s')" "$(date '+%Y-%m-%d %H:%M:%S %z')" > "$SESSION/recording_started_at.txt"
   local mix
-  if [ "$n" -eq 1 ]; then mix="${filters[0]}acopy"
-  else mix="$(IFS=; echo "${filters[*]}")amix=inputs=$n:duration=longest"; fi
+  if [ "$n" -eq 1 ]; then
+    mix="${filters[0]}acopy"
+  else
+    # Normalize the independent device clocks before mixing. Without this,
+    # AVFoundation can produce a file shorter than the real meeting.
+    mix="[0:a]aresample=async=1:first_pts=0[a0];[1:a]aresample=async=1:first_pts=0[a1];[a0][a1]amix=inputs=2:duration=longest:dropout_transition=0"
+  fi
   ffmpeg -nostdin -y -hide_banner -loglevel error "${inputs[@]}" \
     -filter_complex "$mix" -ac 1 -ar 44100 -c:a pcm_s16le \
     "$SESSION/audio.wav" >> "$LOG" 2>&1 &
   FFPID=$!
+  {
+    echo "blackhole_device: $BH"
+    echo "microphone_device: $MIC"
+    echo "system_output_route: PhysicsClass Multi-Output"
+    echo "student_audio_expected: yes"
+  } > "$SESSION/audio_route.txt"
   log "RECORDING started (pid $FFPID, platform=$platform, session=$SESSION, bh=$BH mic=$MIC)"
   notify "recording" "检测到开课，录音已开始"
   # Lock the course while calendar/prep metadata is available. Transcription can
@@ -315,10 +306,27 @@ stop_recording() {
   [ -z "$FFPID" ] && return
   kill -INT "$FFPID" 2>/dev/null
   wait "$FFPID" 2>/dev/null
+  printf '%s %s\n' "$(date '+%s')" "$(date '+%Y-%m-%d %H:%M:%S %z')" > "$SESSION/recording_stopped_at.txt"
+  check_recording_duration "$SESSION"
   log "RECORDING stopped (session=$SESSION)"
   bash "$SCRIPT_DIR/setup_audio.sh" restore >> "$LOG" 2>&1 || true
   transcribe_session "$SESSION"
   FFPID=""; SESSION=""; MATCH_RETRY_STAMP=0
+}
+
+check_recording_duration() {
+  local dir="$1" start_epoch stop_epoch wall_seconds audio_seconds
+  [ -s "$dir/recording_started_at.txt" ] || return 0
+  [ -f "$dir/audio.wav" ] || return 0
+  start_epoch=$(awk 'NR==1 {print $1}' "$dir/recording_started_at.txt")
+  stop_epoch=$(awk 'NR==1 {print $1}' "$dir/recording_stopped_at.txt" 2>/dev/null || date '+%s')
+  audio_seconds=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$dir/audio.wav" 2>/dev/null || echo 0)
+  wall_seconds=$((stop_epoch - start_epoch))
+  if [ "$wall_seconds" -gt 120 ] && awk "BEGIN {exit !($audio_seconds < $wall_seconds * 0.75)}"; then
+    : > "$dir/recording_incomplete"
+    log "WARNING: recorded audio is shorter than meeting runtime (audio=${audio_seconds}s wall=${wall_seconds}s, session=$dir)"
+    notify "recording-incomplete" "录音时长明显短于会议时长，已暂停课后反馈并保留音频供检查"
+  fi
 }
 
 transcribe_session() {
@@ -446,6 +454,11 @@ while true; do
   platform=$(meeting_running) && in_meeting=1 || in_meeting=0
   if [ "$in_meeting" = 1 ]; then
     miss=0
+    if [ -n "$FFPID" ] && ! kill -0 "$FFPID" 2>/dev/null; then
+      log "ERROR: recording process exited unexpectedly (pid=$FFPID, session=$SESSION)"
+      notify "recording-error" "录音进程意外中断，已保留当前片段并尝试恢复"
+      FFPID=""
+    fi
     [ -z "$FFPID" ] && start_recording "$platform"
     [ -n "$FFPID" ] && retry_course_match
   else

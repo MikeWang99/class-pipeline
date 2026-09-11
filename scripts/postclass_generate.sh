@@ -110,6 +110,16 @@ if [ "${meaningful_line_count:-0}" -lt 3 ]; then
   TRANSCRIPT_QUALITY="unusable_for_lesson_feedback"
   MATERIAL_STATUS="待人工确认录音"
 fi
+if [ -f "$SESSION_DIR/recording_incomplete" ]; then
+  TRANSCRIPT_QUALITY="recording_incomplete"
+  MATERIAL_STATUS="待人工确认录音"
+fi
+if [ "$TRANSCRIPT_QUALITY" = "usable" ]; then
+  if [ "$(python3 "$SCRIPT_DIR/check_transcript_quality.py" "$TRANSCRIPT" 2>/dev/null || true)" = "unusable" ]; then
+    TRANSCRIPT_QUALITY="unusable_for_lesson_feedback"
+    MATERIAL_STATUS="待人工确认录音"
+  fi
+fi
 
 cat > "$OUTFILE" <<EOF
 ---
