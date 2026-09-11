@@ -10,6 +10,7 @@ set -u
 BH_NAME="BlackHole 2ch"
 MO_NAME="PhysicsClass Multi-Output"
 SWIFT_SRC="$(cd "$(dirname "$0")" && pwd)/create_multi_output.swift"
+STATE_FILE="${TMPDIR:-/tmp}/physics-class-pipeline-output-device.txt"
 
 log() { echo "[audio] $*"; }
 
@@ -80,6 +81,8 @@ activate() {
     brew install switchaudio-osx >/dev/null 2>&1 || true
   fi
   if command -v SwitchAudioSource >/dev/null 2>&1 && device_exists "$MO_NAME"; then
+    # Preserve the exact device selected before class; never guess on restore.
+    SwitchAudioSource -c -t output > "$STATE_FILE"
     SwitchAudioSource -s "$MO_NAME" -t output && log "System output -> $MO_NAME"
   else
     log "ERROR: cannot switch output (missing SwitchAudioSource or device). Set manually in System Settings -> Sound."
@@ -89,12 +92,16 @@ activate() {
 
 restore() {
   if command -v SwitchAudioSource >/dev/null 2>&1; then
-    # pick the first non-BlackHole, non-multi-output output
     local dev
-    dev=$(SwitchAudioSource -a -t output | grep -vi "blackhole" | grep -vi "multi-output" | grep -vi "aggregate" | head -1)
+    dev=$(cat "$STATE_FILE" 2>/dev/null || true)
+    if [ -z "$dev" ] || ! device_exists "$dev"; then
+      # Compatibility fallback for sessions started before state tracking.
+      dev=$(SwitchAudioSource -a -t output | grep -vi "blackhole" | grep -vi "multi-output" | grep -vi "aggregate" | head -1)
+    fi
     if [ -n "$dev" ]; then
       SwitchAudioSource -s "$dev" -t output && log "System output restored -> $dev"
     fi
+    unlink "$STATE_FILE" 2>/dev/null || true
   fi
 }
 
