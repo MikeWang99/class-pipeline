@@ -26,6 +26,18 @@ def select_event(lines: list[str], keyword: str, reference: datetime, max_delta:
         if len(parts) < 2:
             continue
         summary, start_text = parts[0].strip(), parts[1].strip()
+        # Swift emits title, start, notes. The AppleScript fallback emits
+        # calendar, title, start, notes. Accept both output shapes.
+        if len(parts) >= 4:
+            try:
+                parse_datetime(start_text)
+            except ValueError:
+                try:
+                    parse_datetime(parts[2].strip())
+                except ValueError:
+                    pass
+                else:
+                    summary, start_text = parts[1].strip(), parts[2].strip()
         match = pattern.search(summary)
         if not match:
             continue

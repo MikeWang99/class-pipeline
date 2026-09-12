@@ -33,6 +33,16 @@ class SelectCalendarEventTests(unittest.TestCase):
             (76, "AP M", "Sujal"),
         )
 
+    def test_accepts_applescript_calendar_prefix(self):
+        lines = [
+            "mike.wang.de@gmail.com\tCIE class-Julien\t2026-09-12T10:30:00+08:00\tmissing value\n"
+        ]
+        ref = datetime.fromisoformat("2026-09-12T10:28:54+08:00")
+        self.assertEqual(
+            MODULE.select_event(lines, "Class", ref, 3600),
+            (66, "CIE", "Julien"),
+        )
+
     def test_rejects_distant_event(self):
         lines = ["CIE Class-Eden\t2026-08-24T10:30:00+08:00\t\n"]
         ref = datetime.fromisoformat("2026-08-24T18:30:00+08:00")

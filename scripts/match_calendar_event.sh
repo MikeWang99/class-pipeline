@@ -114,13 +114,16 @@ PY
 }
 
 MATCH=""
-EVENTS="$("$QUERY_SCRIPT" "$REF_DATE" 2>/dev/null)" || EVENTS=""
-if [ -n "$EVENTS" ]; then
-  MATCH="$(printf '%s\n' "$EVENTS" | pick_best_event 2>/dev/null)" || MATCH=""
-fi
+# The pre-class note stores the exact event_start captured during the daily
+# scan. Prefer it when available so a temporary EventKit/launchd access issue
+# cannot turn an otherwise known class into an unmatched session.
+MATCH="$(pick_from_prep_notes 2>/dev/null)" || MATCH=""
 
 if [ -z "$MATCH" ]; then
-  MATCH="$(pick_from_prep_notes 2>/dev/null)" || MATCH=""
+  EVENTS="$("$QUERY_SCRIPT" "$REF_DATE" 2>/dev/null)" || EVENTS=""
+  if [ -n "$EVENTS" ]; then
+    MATCH="$(printf '%s\n' "$EVENTS" | pick_best_event 2>/dev/null)" || MATCH=""
+  fi
 fi
 
 [ -n "$MATCH" ] || exit 1

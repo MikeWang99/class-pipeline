@@ -41,7 +41,9 @@ class PostclassQueueTests(unittest.TestCase):
             )
             self.assertEqual(len(materials), 1)
             text = materials[0].read_text(encoding="utf-8")
-            self.assertIn("status: 待AI识别学生", text)
+            # Repetitive Whisper output is held for audio review before any
+            # student identity is acted on; the transcript remains queued.
+            self.assertIn("status: 待人工确认录音", text)
             self.assertIn("calendar_match_status: unmatched", text)
 
     def test_previous_feedback_uses_latest_date_not_file_mtime(self):
