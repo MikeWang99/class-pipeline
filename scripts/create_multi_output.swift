@@ -1,155 +1,155 @@
 // create_multi_output.swift
-// Creates (or reuses) a CoreAudio Multi-Output device containing the current
-// default output device + BlackHole 2ch, so meeting audio plays normally AND
-// gets mirrored into BlackHole for recording.
 //
-// Modern macOS SDKs no longer expose AudioDeviceCreateAggregateDevice, so we
-// use the supported workaround: write the aggregate device definition into the
-// "Audio Device Preferences" plist. The device becomes visible after the
-// coreaudiod service restarts (handled by setup_audio.sh).
+// Rebuild the pipeline-owned stacked output device from a specific playback
+// device and BlackHole. A multi-output device is not adaptive: if it was first
+// created while another monitor/headphone was selected, it keeps mirroring that
+// stale device forever. Recreating this one at class start prevents the system
+// output and BlackHole capture path from drifting apart.
 //
-// Usage: swift create_multi_output.swift "Device Name"
+// Usage:
+//   swift create_multi_output.swift ensure "PhysicsClass Multi-Output" "Mac mini扬声器"
 
-import Foundation
 import CoreAudio
+import Foundation
 
-let deviceName = CommandLine.arguments.count > 1
-    ? CommandLine.arguments[1] : "PhysicsClass Multi-Output"
+let aggregateUID = "physics-class-pipeline-multiout"
 
-func check(_ status: OSStatus, _ what: String) {
+func fail(_ message: String) -> Never {
+    FileHandle.standardError.write(("ERROR: \(message)\n").data(using: .utf8)!)
+    exit(1)
+}
+
+func check(_ status: OSStatus, _ action: String) {
     if status != noErr {
-        FileHandle.standardError.write("ERROR (\(what)): OSStatus \(status)\n".data(using: .utf8)!)
-        exit(1)
+        fail("\(action) failed (OSStatus \(status))")
     }
 }
 
-func deviceName(_ id: AudioDeviceID) -> String {
-    var address = AudioObjectPropertyAddress(
-        mSelector: kAudioDevicePropertyDeviceNameCFString,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain)
-    var name: CFString = "" as CFString
-    var size = UInt32(MemoryLayout<CFString>.size)
-    let status = AudioObjectGetPropertyData(id, &address, 0, nil, &size, &name)
-    return status == noErr ? (name as String) : ""
-}
-
-func deviceUID(_ id: AudioDeviceID) -> String {
-    var address = AudioObjectPropertyAddress(
-        mSelector: kAudioDevicePropertyDeviceUID,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain)
-    var uid: CFString = "" as CFString
-    var size = UInt32(MemoryLayout<CFString>.size)
-    let status = AudioObjectGetPropertyData(id, &address, 0, nil, &size, &uid)
-    return status == noErr ? (uid as String) : ""
-}
-
-func defaultOutputDevice() -> AudioDeviceID {
-    var address = AudioObjectPropertyAddress(
-        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain)
-    var device: AudioDeviceID = kAudioObjectUnknown
-    var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-    check(AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address,
-                                    0, nil, &size, &device), "get default output")
-    return device
-}
-
-func findDevice(named name: String) -> AudioDeviceID? {
+func deviceList() -> [AudioDeviceID] {
     var address = AudioObjectPropertyAddress(
         mSelector: kAudioHardwarePropertyDevices,
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain)
     var size: UInt32 = 0
-    check(AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address,
-                                         0, nil, &size), "device list size")
-    let count = Int(size) / MemoryLayout<AudioDeviceID>.size
-    var devices = [AudioDeviceID](repeating: kAudioObjectUnknown, count: count)
-    check(AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address,
-                                     0, nil, &size, &devices), "device list")
-    return devices.first { deviceName($0).lowercased().contains(name.lowercased()) }
+    check(AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject),
+                                         &address, 0, nil, &size), "reading audio device list size")
+    var devices = [AudioDeviceID](repeating: kAudioObjectUnknown,
+                                  count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+    check(AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
+                                     &address, 0, nil, &size, &devices), "reading audio device list")
+    return devices
 }
 
-guard let bh = findDevice(named: "BlackHole") else {
-    FileHandle.standardError.write("ERROR: BlackHole device not found (reboot after install)\n".data(using: .utf8)!)
-    exit(1)
+func stringProperty(_ device: AudioDeviceID, _ selector: AudioObjectPropertySelector) -> String {
+    var address = AudioObjectPropertyAddress(
+        mSelector: selector,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    var value: Unmanaged<CFString>?
+    var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+    guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr,
+          let value else {
+        return ""
+    }
+    return value.takeUnretainedValue() as String
 }
 
-// reuse an existing multi-output device with our name
-if findDevice(named: deviceName) != nil {
-    print("multi-output device '\(deviceName)' already exists")
-    exit(0)
+func name(of device: AudioDeviceID) -> String {
+    stringProperty(device, kAudioDevicePropertyDeviceNameCFString)
 }
 
-let defOut = defaultOutputDevice()
-var subDevices: [[String: Any]] = []
-if defOut != bh && defOut != kAudioObjectUnknown {
-    subDevices.append([
-        "audio-subdevice-uid": deviceUID(defOut),
-        "drift-compensation": 0,
+func uid(of device: AudioDeviceID) -> String {
+    stringProperty(device, kAudioDevicePropertyDeviceUID)
+}
+
+func device(named wanted: String) -> AudioDeviceID? {
+    let exact = deviceList().first { name(of: $0) == wanted }
+    return exact ?? deviceList().first { name(of: $0).caseInsensitiveCompare(wanted) == .orderedSame }
+}
+
+func updatePersistentDefinition(name aggregateName: String, playbackUID: String, blackHoleUID: String) {
+    let fm = FileManager.default
+    let byHost = fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Preferences/ByHost")
+    guard let files = try? fm.contentsOfDirectory(at: byHost, includingPropertiesForKeys: nil),
+          let path = files.first(where: {
+              $0.lastPathComponent.hasPrefix("com.apple.audio.SystemSettings") &&
+              $0.pathExtension == "plist"
+          }) else {
+        return
+    }
+    guard let data = try? Data(contentsOf: path),
+          var plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
+        return
+    }
+
+    var devices = plist["Audio Device Preferences"] as? [[String: Any]] ?? []
+    devices.removeAll { ($0["aggregate-device-uid"] as? String) == aggregateUID }
+    devices.append([
+        "aggregate-device-uid": aggregateUID,
+        "name": aggregateName,
+        "main-subdevice": playbackUID,
+        "is-stack": 1,
+        "is-named": 1,
+        "is-hidden": 0,
+        "subdevices": [
+            ["audio-subdevice-uid": playbackUID, "drift-compensation": 0],
+            ["audio-subdevice-uid": blackHoleUID, "drift-compensation": 1],
+        ],
     ])
-}
-subDevices.append([
-    "audio-subdevice-uid": deviceUID(bh),
-    "drift-compensation": 0,
-])
-
-let uid = "physics-class-pipeline-multiout"
-let aggregate: [String: Any] = [
-    "aggregate-device-uid": uid,
-    "name": deviceName,
-    "main-subdevice": deviceUID(defOut != bh ? defOut : bh),
-    "is-stack": 1,
-    "is-named": 1,
-    "is-hidden": 0,
-    "subdevices": subDevices,
-]
-
-// merge into existing "Audio Device Preferences" (com.apple.audio.SystemSettings,
-// currentHost domain) using Foundation property-list APIs
-func hostPlistPath() -> String? {
-    let dir = NSHomeDirectory() + "/Library/Preferences/ByHost"
-    guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return nil }
-    if let existing = files.first(where: { $0.hasPrefix("com.apple.audio.SystemSettings") && $0.hasSuffix(".plist") }) {
-        return dir + "/" + existing
+    plist["Audio Device Preferences"] = devices
+    guard let output = try? PropertyListSerialization.data(fromPropertyList: plist,
+                                                            format: .binary,
+                                                            options: 0) else {
+        return
     }
-    // never created before: borrow the hardware UUID suffix from any other ByHost plist
-    if let donor = files.first(where: { $0.hasSuffix(".plist") }) {
-        let comps = donor.components(separatedBy: ".")
-        if comps.count >= 3 {
-            let uuid = comps[comps.count - 2]
-            return dir + "/com.apple.audio.SystemSettings." + uuid + ".plist"
+    try? output.write(to: path)
+}
+
+func ensure(aggregateName: String, playbackName: String) {
+    guard let playback = device(named: playbackName) else {
+        let choices = deviceList().map(name(of:)).filter { !$0.isEmpty }.joined(separator: "、")
+        fail("playback device '\(playbackName)' not found (available: \(choices))")
+    }
+    guard let blackHole = deviceList().first(where: { name(of: $0).localizedCaseInsensitiveContains("blackhole") }) else {
+        fail("BlackHole 2ch is not available")
+    }
+    guard playback != blackHole else {
+        fail("the playback device cannot be BlackHole")
+    }
+
+    // The device is owned by this pipeline UID. Removing it is safe and lets
+    // the current playback device become the actual main sub-device immediately.
+    if let existing = device(named: aggregateName) {
+        let status = AudioHardwareDestroyAggregateDevice(existing)
+        if status != noErr && status != kAudioHardwareBadObjectError {
+            fail("replacing stale multi-output device failed (OSStatus \(status))")
         }
+        Thread.sleep(forTimeInterval: 0.25)
     }
-    return nil
+
+    let playbackUID = uid(of: playback)
+    let blackHoleUID = uid(of: blackHole)
+    updatePersistentDefinition(name: aggregateName, playbackUID: playbackUID, blackHoleUID: blackHoleUID)
+
+    let definition: [String: Any] = [
+        kAudioAggregateDeviceUIDKey: aggregateUID,
+        kAudioAggregateDeviceNameKey: aggregateName,
+        kAudioAggregateDeviceIsPrivateKey: 0,
+        kAudioAggregateDeviceIsStackedKey: 1,
+        kAudioAggregateDeviceMainSubDeviceKey: playbackUID,
+        kAudioAggregateDeviceSubDeviceListKey: [
+            [kAudioSubDeviceUIDKey: playbackUID, kAudioSubDeviceDriftCompensationKey: 0],
+            [kAudioSubDeviceUIDKey: blackHoleUID, kAudioSubDeviceDriftCompensationKey: 1],
+        ],
+    ]
+    var aggregate = AudioDeviceID(kAudioObjectUnknown)
+    check(AudioHardwareCreateAggregateDevice(definition as CFDictionary, &aggregate),
+          "creating multi-output device")
+    print("multi-output ready: \(aggregateName) = \(playbackName) + \(name(of: blackHole))")
 }
 
-func readHostDomain() -> [String: Any] {
-    guard let path = hostPlistPath(),
-          let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-          let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
-        return [:]
-    }
-    return plist
+guard CommandLine.arguments.count == 4, CommandLine.arguments[1] == "ensure" else {
+    fail("usage: create_multi_output.swift ensure <multi-output name> <playback device name>")
 }
 
-func writeHostDomain(_ plist: [String: Any]) {
-    guard let path = hostPlistPath() else {
-        FileHandle.standardError.write("ERROR: cannot locate/create ByHost plist\n".data(using: .utf8)!)
-        exit(1)
-    }
-    let data = try! PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0)
-    try! data.write(to: URL(fileURLWithPath: path))
-}
-
-var plist = readHostDomain()
-var prefs = plist["Audio Device Preferences"] as? [[String: Any]] ?? []
-prefs.removeAll { ($0["aggregate-device-uid"] as? String) == uid }
-prefs.append(aggregate)
-plist["Audio Device Preferences"] = prefs
-writeHostDomain(plist)
-
-print("multi-output device '\(deviceName)' written to Audio Device Preferences")
-print("NOTE: restart coreaudiod to activate: sudo killall coreaudiod")
+ensure(aggregateName: CommandLine.arguments[2], playbackName: CommandLine.arguments[3])

@@ -14,6 +14,8 @@ description: 物理教学课前/课中/课后全链路自动化。课前定时�
   - `recordings_dir`：录音/文字稿工作目录（默认 `~/physics-class-pipeline-data`）
   - `calendar_keyword`：日历事件识别关键词（默认 `Class`）
   - `scan_hour` / `scan_minute`：每日课前扫描时间（默认 10:00）
+  - `playback_device`：上课实际使用的扬声器名称；本机固定为 `Mac mini扬声器`。Watcher 会在每节课开始前用它和 BlackHole 重建多输出设备，避免旧的显示器/耳机配置被复用。
+  - `microphone_device`：优先使用的物理麦克风名称；留空时才自动选择。
 - **笔记根目录**：`{vault_path}/上课记录/`，下设四个子分区：
   - `备课内容/`、`课堂文字稿/`、`课后反馈/`、`课后反馈草稿/`、`学生档案/`
 - **文件命名**：`YYYY-MM-DD {体系} Class-{学生}.md`（学生档案固定为 `{学生}.md`，累积更新）
@@ -54,8 +56,8 @@ setup.sh 会自动完成：依赖检查（brew/ffmpeg 缺则自动装/python3/sw
 launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 
 - **覆盖平台**：Zoom（zoom.us）、腾讯会议（wemeetapp/xmeet）、钉钉、飞书、Google Meet（Chrome/Safari 打开 meet.google.com 标签页）
-- **检测到开课**：自动用 ffmpeg 录制 BlackHole（会议双方声音）+ 麦克风（双保险），存入 `{recordings_dir}/sessions/{YYYY-MM-DD_HHMM}/audio.wav`
-- **检测到散会**（连续 45 秒无会议进程）：停止录音 → 使用本地 Whisper Turbo 转写 → 文字稿存 `transcript.txt` → **无论是否匹配到日历，都会先把文字稿归档到 Vault 的 `课堂文字稿/`** → 创建课后反馈待处理素材并交给当前 AI；只有正式反馈和学生档案更新成功后才删除对应的 `audio.wav`（写入 `audio_deleted.txt` 删除记录），待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核
+- **检测到开课**：先按 `playback_device` 动态重建 `PhysicsClass Multi-Output`（指定扬声器 + BlackHole），再自动录制。录音左声道保留 BlackHole 系统声，右声道保留物理麦克风，存入 `{recordings_dir}/sessions/{YYYY-MM-DD_HHMM}/audio.wav`。
+- **检测到散会**（连续 45 秒无会议进程）：停止录音 → 先写入 `audio_health.json` 检查系统声和麦克风是否实际采集到；长录音还会写入 `transcription_preflight.json`，用本地 Turbo 抽样排除重复幻听。任一检查失败时，保留音频、写明故障并跳过完整转写和反馈；健康时才使用本地 Whisper Turbo 转写 → 文字稿存 `transcript.txt` → **无论是否匹配到日历，都会先把文字稿归档到 Vault 的 `课堂文字稿/`** → 创建课后反馈待处理素材并交给当前 AI；只有正式反馈和学生档案更新成功后才删除对应的 `audio.wav`（写入 `audio_deleted.txt` 删除记录），待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核
 - **课程身份锁定**：开课时立即按 session 时间匹配日历；若 EventKit 或 iCloud 当时短暂不可用，录音期间每 60 秒重试，直到将 `{SYSTEM}|{STUDENT}` 写入 `calendar_match.txt`
 
 用户无需任何手动操作。若用户说「开始上课/手动录音」，可直接运行 `bash {skill_dir}/scripts/meeting_watcher.sh once` 强制走一轮录音+转写。
@@ -97,7 +99,7 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 
 | 现象 | 处理 |
 |---|---|
-| 录音文件无声/只有单方 | 确认 `PhysicsClass Multi-Output` 中包含你实际使用的扬声器（本机为 `Mac mini扬声器`）和 `BlackHole 2ch`；运行 `scripts/setup_audio.sh check`。若 BlackHole 或多输出路由缺失，watcher 会拒绝启动不完整录音并提示修复 |
+| 录音文件无声/只有单方 | 确认 `config.json` 的 `playback_device` 是实际扬声器（本机为 `Mac mini扬声器`），并运行 `scripts/setup_audio.sh ensure "Mac mini扬声器"` 重建绑定。每节课结束后查看 session 的 `audio_health.json`：它会明确标出系统声、麦克风或两者均缺失；此类课程会自动保留音频并跳过错误转写。 |
 | 录音时长明显短于实际课程 | 检查 `recording_started_at.txt`、`recording_stopped_at.txt` 与 `recording_incomplete`；先修复音频路由，再重新上课，不能拿不完整录音生成反馈 |
 | 没检测到开会 | 运行 `bash scripts/meeting_watcher.sh once` 看检测日志；浏览器开 Meet 需在 Chrome/Safari 且标签页可见 |
 | 日志报 `MIC PERMISSION: missing` | 麦克风未授权：打开 系统设置→隐私与安全性→麦克风，把 PhysicsClassWatcher 打开（或重跑 setup.sh 触发弹窗） |

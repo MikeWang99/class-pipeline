@@ -36,6 +36,8 @@ if [ -n "$WHISPER_MODEL_CFG" ]; then
   export WHISPER_MODEL="${WHISPER_MODEL_CFG/#\~/$HOME}"
 fi
 export TRANSCRIBE_LANGUAGE="$(cfg transcribe_language "auto")"
+PLAYBACK_DEVICE="$(cfg playback_device "")"
+MICROPHONE_DEVICE="$(cfg microphone_device "")"
 LOG_DIR="$RECORD_DIR/logs"
 mkdir -p "$RECORD_DIR/sessions" "$LOG_DIR"
 LOG="$LOG_DIR/watcher.log"
@@ -93,8 +95,13 @@ audio_indices() {
   local listing bh mic
   listing=$(ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1)
   bh=$(echo "$listing" | grep -i "blackhole" | head -1 | grep -o '\[[0-9]*\]' | head -1 | tr -d '[]')
+  if [ -n "$MICROPHONE_DEVICE" ]; then
+    mic=$(echo "$listing" | grep -F "$MICROPHONE_DEVICE" | head -1 | grep -o '\[[0-9]*\]' | head -1 | tr -d '[]')
+  fi
   # prefer physical mics; iPhone continuity mics stall and freeze amix
-  mic=$(echo "$listing" | grep -iE "外置|内置|built-in|macbook|microphone" | grep -vi "iphone" | head -1 | grep -o '\[[0-9]*\]' | head -1 | tr -d '[]')
+  if [ -z "${mic:-}" ]; then
+    mic=$(echo "$listing" | grep -iE "外置|内置|built-in|macbook|microphone" | grep -vi "iphone" | head -1 | grep -o '\[[0-9]*\]' | head -1 | tr -d '[]')
+  fi
   if [ -z "$mic" ]; then
     mic=$(echo "$listing" | grep -iE "麦克风|microphone" | grep -vi "iphone" | head -1 | grep -o '\[[0-9]*\]' | head -1 | tr -d '[]')
   fi
@@ -269,13 +276,13 @@ start_recording() {
   # Route meeting output before opening the capture stream. Starting ffmpeg
   # first can leave the session recording only the microphone when the output
   # switch takes effect a moment later.
-  if ! bash "$SCRIPT_DIR/setup_audio.sh" activate >> "$LOG" 2>&1; then
+  if ! PHYSICSCLASS_PLAYBACK_DEVICE="$PLAYBACK_DEVICE" bash "$SCRIPT_DIR/setup_audio.sh" activate "$PLAYBACK_DEVICE" >> "$LOG" 2>&1; then
     log "ERROR: meeting output routing unavailable; refusing to start recording without both sides of the class"
     notify_throttled "audio-route" "检测到开会但会议音频路由未就绪：请启用 PhysicsClass Multi-Output 后再开始录音"
     return 1
   fi
-  inputs+=(-f avfoundation -i ":$BH"); filters+=("[$n:a]"); n=$((n+1))
-  inputs+=(-f avfoundation -i ":$MIC"); filters+=("[$n:a]"); n=$((n+1))
+  inputs+=(-thread_queue_size 4096 -f avfoundation -i ":$BH"); filters+=("[$n:a]"); n=$((n+1))
+  inputs+=(-thread_queue_size 4096 -f avfoundation -i ":$MIC"); filters+=("[$n:a]"); n=$((n+1))
   SESSION="$RECORD_DIR/sessions/$(date '+%Y-%m-%d_%H%M%S')"
   MATCH_RETRY_STAMP=0
   mkdir -p "$SESSION"
@@ -285,19 +292,23 @@ start_recording() {
   if [ "$n" -eq 1 ]; then
     mix="${filters[0]}acopy"
   else
-    # Normalize the independent device clocks before mixing. Without this,
-    # AVFoundation can produce a file shorter than the real meeting.
-    mix="[0:a]aresample=async=1:first_pts=0[a0];[1:a]aresample=async=1:first_pts=0[a1];[a0][a1]amix=inputs=2:duration=longest:dropout_transition=0"
+    # Keep BlackHole and the microphone separate. A mixed mono file hides a
+    # failed system-audio route behind room noise, making it impossible to
+    # distinguish a bad recording from a Whisper error after class.
+    mix="[0:a]aresample=async=1:first_pts=0,pan=mono|c0=0.5*c0+0.5*c1[system];[1:a]aresample=async=1:first_pts=0,pan=mono|c0=c0[mic];[system][mic]amerge=inputs=2"
   fi
   ffmpeg -nostdin -y -hide_banner -loglevel error "${inputs[@]}" \
-    -filter_complex "$mix" -ac 1 -ar 44100 -c:a pcm_s16le \
+    -filter_complex "$mix" -ac 2 -ar 44100 -c:a pcm_s16le \
     "$SESSION/audio.wav" >> "$LOG" 2>&1 &
   FFPID=$!
   {
     echo "blackhole_device: $BH"
     echo "microphone_device: $MIC"
+    echo "configured_microphone: ${MICROPHONE_DEVICE:-auto}"
+    echo "playback_device: ${PLAYBACK_DEVICE:-previous default output}"
     echo "system_output_route: PhysicsClass Multi-Output"
-    echo "student_audio_expected: yes"
+    echo "channel_1: BlackHole system audio"
+    echo "channel_2: physical microphone"
   } > "$SESSION/audio_route.txt"
   log "RECORDING started (pid $FFPID, platform=$platform, session=$SESSION, bh=$BH mic=$MIC)"
   notify "recording" "检测到开课，录音已开始"
@@ -313,6 +324,8 @@ stop_recording() {
   wait "$FFPID" 2>/dev/null
   printf '%s %s\n' "$(date '+%s')" "$(date '+%Y-%m-%d %H:%M:%S %z')" > "$SESSION/recording_stopped_at.txt"
   check_recording_duration "$SESSION"
+  check_audio_capture "$SESSION" || true
+  check_transcription_preflight "$SESSION" || true
   log "RECORDING stopped (session=$SESSION)"
   bash "$SCRIPT_DIR/setup_audio.sh" restore >> "$LOG" 2>&1 || true
   transcribe_session "$SESSION"
@@ -332,6 +345,44 @@ check_recording_duration() {
     log "WARNING: recorded audio is shorter than meeting runtime (audio=${audio_seconds}s wall=${wall_seconds}s, session=$dir)"
     notify "recording-incomplete" "录音时长明显短于会议时长，已暂停课后反馈并保留音频供检查"
   fi
+}
+
+check_audio_capture() {
+  local dir="$1" rc status
+  [ -f "$dir/audio.wav" ] || return 0
+  python3 "$SCRIPT_DIR/check_audio_capture.py" "$dir/audio.wav" \
+    --output "$dir/audio_health.json" >> "$LOG" 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -eq 1 ] || {
+    log "WARNING: audio source health check failed to run (session=$dir)"
+    return 0
+  }
+  status=$(python3 -c "import json; print(json.load(open('$dir/audio_health.json')).get('status', 'unknown'))" 2>/dev/null || echo unknown)
+  : > "$dir/audio_input_unhealthy"
+  log "WARNING: audio source health check failed (status=$status, session=$dir)"
+  notify "audio-input-unhealthy" "录音已保留，但系统声或麦克风未被正确采集；已跳过错误转写和课后反馈"
+  return 1
+}
+
+check_transcription_preflight() {
+  local dir="$1" rc status
+  [ -f "$dir/audio.wav" ] || return 0
+  [ -f "$dir/audio_input_unhealthy" ] && return 0
+  python3 "$SCRIPT_DIR/check_transcription_preflight.py" "$dir/audio.wav" \
+    --output "$dir/transcription_preflight.json" >> "$LOG" 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -eq 1 ] || {
+    log "WARNING: transcription preflight failed to run (session=$dir)"
+    return 0
+  }
+  status=$(python3 -c "import json; print(json.load(open('$dir/transcription_preflight.json')).get('status', 'unknown'))" 2>/dev/null || echo unknown)
+  [ "$status" = "unusable" ] || return 0
+  : > "$dir/audio_content_unhealthy"
+  log "WARNING: transcription preflight rejected audio content (session=$dir)"
+  notify "audio-content-unhealthy" "录音已保留，但抽样转写重复异常；已跳过完整转写和课后反馈"
+  return 1
 }
 
 transcribe_session() {
@@ -365,9 +416,19 @@ transcribe_session() {
   local size
   size=$(stat -f%z "$dir/audio.wav" 2>/dev/null || echo 0)
   if [ "$size" -lt 100000 ]; then log "audio too small ($size bytes), skipping transcription"; notify "skip" "录音文件过小，跳过转写"; return; fi
-  notify "transcribing" "会议结束，录音已停止，正在转写文字稿…"
+  if [ -f "$dir/audio_input_unhealthy" ] || [ -f "$dir/audio_content_unhealthy" ]; then
+    if [ -f "$dir/audio_input_unhealthy" ]; then
+      printf '%s\n' "[00:00 - 00:00] [录音输入自检失败：系统声或麦克风没有被正确采集，未生成课堂文字稿。]" > "$dir/transcript.txt"
+      log "transcription skipped after audio source health failure (session=$dir)"
+    else
+      printf '%s\n' "[00:00 - 00:00] [录音抽样转写重复异常：未生成完整课堂文字稿。]" > "$dir/transcript.txt"
+      log "transcription skipped after preflight rejection (session=$dir)"
+    fi
+  else
+    notify "transcribing" "会议结束，录音已停止，正在转写文字稿…"
+  fi
   # Transcription is intentionally local-only; no API key is loaded here.
-  if python3 "$SCRIPT_DIR/transcribe_audio.py" "$dir/audio.wav" "$dir" >> "$LOG" 2>&1; then
+  if [ -f "$dir/audio_input_unhealthy" ] || [ -f "$dir/audio_content_unhealthy" ] || python3 "$SCRIPT_DIR/transcribe_audio.py" "$dir/audio.wav" "$dir" >> "$LOG" 2>&1; then
     if [ -s "$dir/calendar_match.txt" ]; then
       match=$(sed -n '1p' "$dir/calendar_match.txt")
       log "using course match locked at recording start (session=$dir, match=$match)"

@@ -112,25 +112,44 @@ def extract_local_segments(result: dict, offset: float) -> list[dict]:
     return segments
 
 
-def convert_to_mono_pcm(source: str, destination: str) -> None:
+def audio_channels(source: str) -> int:
+    out = subprocess.check_output(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+         "stream=channels", "-of", "default=noprint_wrappers=1:nokey=1", source],
+        text=True,
+    ).strip()
+    return int(out)
+
+
+def conversion_filter(channels: int) -> str:
+    # New pipeline recordings are stereo: left = BlackHole system audio,
+    # right = teacher microphone. Blend the sources only for transcription,
+    # after retaining the raw channels for diagnostics.
+    source_mix = "pan=mono|c0=0.707*c0+0.707*c1" if channels >= 2 else "acopy"
+    return f"{source_mix},highpass=f=70,dynaudnorm=f=150:g=15:p=0.95"
+
+
+def convert_to_mono_pcm(source: str, destination: str, channels: int) -> None:
     subprocess.run([
         "ffmpeg", "-nostdin", "-y", "-v", "error", "-i", source,
-        "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", destination,
+        "-af", conversion_filter(channels), "-ac", "1", "-ar", "16000",
+        "-c:a", "pcm_s16le", destination,
     ], check=True)
 
 
-def transcribe_chunks(audio: str, outdir: str, duration: float,
+def transcribe_chunks(audio: str, outdir: str, duration: float, channels: int,
                       language: str | None) -> list[dict]:
     segments: list[dict] = []
     with tempfile.TemporaryDirectory(prefix="physics-transcribe-") as tmp:
         if duration <= SINGLE_FILE_LIMIT:
             chunk_paths = [os.path.join(tmp, "chunk_000.wav")]
-            convert_to_mono_pcm(audio, chunk_paths[0])
+            convert_to_mono_pcm(audio, chunk_paths[0], channels)
         else:
             pattern = os.path.join(tmp, "chunk_%03d.wav")
             subprocess.run([
                 "ffmpeg", "-nostdin", "-y", "-v", "error", "-i", audio,
-                "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+                "-af", conversion_filter(channels), "-ac", "1", "-ar", "16000",
+                "-c:a", "pcm_s16le",
                 "-f", "segment", "-segment_time", str(CHUNK_SECONDS),
                 "-reset_timestamps", "1", pattern,
             ], check=True)
@@ -161,11 +180,12 @@ def main() -> None:
     language = os.environ.get("TRANSCRIBE_LANGUAGE", "auto")
     os.makedirs(outdir, exist_ok=True)
     duration = probe_duration(audio)
+    channels = audio_channels(audio)
     print(f"Backend: local whisper.cpp", file=sys.stderr)
     print(f"Model: {WHISPER_MODEL}", file=sys.stderr)
     print(f"Audio duration: {fmt_ts(duration)}", file=sys.stderr)
 
-    segments = transcribe_chunks(audio, outdir, duration, language)
+    segments = transcribe_chunks(audio, outdir, duration, channels, language)
     with open(os.path.join(outdir, "transcript.txt"), "w", encoding="utf-8") as f:
         for segment in segments:
             f.write(
@@ -180,6 +200,7 @@ def main() -> None:
             "model": WHISPER_MODEL,
             "language": language,
             "duration_seconds": duration,
+            "source_channels": channels,
             "segment_count": len(segments),
         }, f, ensure_ascii=False, indent=2)
     print(f"Done: {len(segments)} segments -> {outdir}/transcript.txt")

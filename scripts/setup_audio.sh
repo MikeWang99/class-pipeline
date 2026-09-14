@@ -1,9 +1,10 @@
 #!/bin/bash
 # setup_audio.sh — install BlackHole and create the multi-output device used for meeting recording.
 # Usage:
-#   bash setup_audio.sh install   # install BlackHole + create multi-output device
-#   bash setup_audio.sh check     # verify audio chain is ready
-#   bash setup_audio.sh activate  # set system output to the multi-output device (before class)
+#   bash setup_audio.sh install [playback device]  # install + bind multi-output
+#   bash setup_audio.sh check [playback device]    # verify audio chain is ready
+#   bash setup_audio.sh activate [playback device] # bind + set output before class
+#   bash setup_audio.sh ensure [playback device]   # rebuild this pipeline's multi-output device
 #   bash setup_audio.sh restore   # set system output back to the built-in/default device
 set -u
 
@@ -49,26 +50,24 @@ install_blackhole() {
 }
 
 create_multi_output() {
-  if system_profiler SPAudioDataType 2>/dev/null | grep -qi "$MO_NAME"; then
-    log "Multi-output device '$MO_NAME' already exists."
+  local playback="${1:-}"
+  if [ -z "$playback" ] && ! command -v SwitchAudioSource >/dev/null 2>&1; then
+    log "Installing SwitchAudioSource..."
+    brew install switchaudio-osx >/dev/null 2>&1 || true
+  fi
+  if [ -z "$playback" ] && command -v SwitchAudioSource >/dev/null 2>&1; then
+    playback=$(SwitchAudioSource -c -t output 2>/dev/null || true)
+  fi
+  if [ -z "$playback" ] || [ "$playback" = "$MO_NAME" ]; then
+    log "ERROR: no physical playback device was supplied for '$MO_NAME'"
+    return 1
+  fi
+  log "Binding '$MO_NAME' to '$playback' and BlackHole..."
+  if swift "$SWIFT_SRC" ensure "$MO_NAME" "$playback"; then
     return 0
   fi
-  log "Trying to create multi-output device '$MO_NAME' automatically..."
-  if swift "$SWIFT_SRC" "$MO_NAME" >/dev/null 2>&1; then
-    osascript -e 'do shell script "killall coreaudiod" with administrator privileges' >/dev/null 2>&1 || true
-    sleep 5
-    if device_exists "$MO_NAME"; then
-      log "Multi-output device '$MO_NAME' is now active."
-      return 0
-    fi
-  fi
-  log "Automatic creation not supported on this macOS version. Two alternatives:"
-  log "  A) (one-time, 30s) Open 'Audio MIDI Setup' (音频 MIDI 设置) -> '+' ->"
-  log "     Create Multi-Output Device -> tick your speakers + 'BlackHole 2ch' ->"
-  log "     right-click rename to: $MO_NAME"
-  log "  B) In your meeting app (Zoom/TencentMeeting), set the SPEAKER/扬声器 to"
-  log "     'BlackHole 2ch' — student audio then flows straight into the recording."
-  return 0   # non-blocking: recording still works with the mic
+  log "ERROR: unable to build the multi-output device for '$playback'"
+  return 1
 }
 
 device_exists() {
@@ -76,13 +75,18 @@ device_exists() {
 }
 
 activate() {
+  local playback="${1:-${PHYSICSCLASS_PLAYBACK_DEVICE:-}}"
   if ! command -v SwitchAudioSource >/dev/null 2>&1; then
     log "Installing SwitchAudioSource..."
     brew install switchaudio-osx >/dev/null 2>&1 || true
   fi
-  if command -v SwitchAudioSource >/dev/null 2>&1 && device_exists "$MO_NAME"; then
+  if command -v SwitchAudioSource >/dev/null 2>&1; then
     # Preserve the exact device selected before class; never guess on restore.
     SwitchAudioSource -c -t output > "$STATE_FILE"
+    [ -n "$playback" ] || playback=$(cat "$STATE_FILE" 2>/dev/null || true)
+    if ! create_multi_output "$playback"; then
+      return 1
+    fi
     SwitchAudioSource -s "$MO_NAME" -t output && log "System output -> $MO_NAME"
   else
     log "ERROR: cannot switch output (missing SwitchAudioSource or device). Set manually in System Settings -> Sound."
@@ -106,6 +110,7 @@ restore() {
 }
 
 check() {
+  local playback="${1:-${PHYSICSCLASS_PLAYBACK_DEVICE:-}}"
   local ok=1
   if has_blackhole; then log "OK: BlackHole visible"; else log "MISSING: BlackHole"; ok=0; fi
   if device_exists "$MO_NAME"; then log "OK: $MO_NAME exists"; else log "MISSING: $MO_NAME"; ok=0; fi
@@ -116,10 +121,19 @@ check() {
   else
     log "WARNING: ffmpeg does not list BlackHole yet"
   fi
+  if [ -n "$playback" ]; then
+    if device_exists "$playback"; then
+      log "OK: preferred playback device '$playback' exists"
+    else
+      log "MISSING: preferred playback device '$playback'"
+      ok=0
+    fi
+  fi
   [ "$ok" = 1 ]
 }
 
 install_audio() {
+  local playback="${1:-${PHYSICSCLASS_PLAYBACK_DEVICE:-}}"
   install_blackhole
   local rc=$?
   if [ "$rc" = 2 ]; then
@@ -128,13 +142,14 @@ install_audio() {
     return 0
   fi
   [ "$rc" = 0 ] || return "$rc"
-  create_multi_output
+  create_multi_output "$playback"
 }
 
 case "${1:-install}" in
-  install) install_audio ;;
-  check) check ;;
-  activate) activate ;;
+  install) install_audio "${2:-}" ;;
+  check) check "${2:-}" ;;
+  ensure) create_multi_output "${2:-}" ;;
+  activate) activate "${2:-}" ;;
   restore) restore ;;
-  *) echo "Usage: $0 {install|check|activate|restore}"; exit 1 ;;
+  *) echo "Usage: $0 {install|check|ensure|activate|restore} [playback device]"; exit 1 ;;
 esac

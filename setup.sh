@@ -126,6 +126,8 @@ cfg = {
     "whisper_model": os.path.expanduser(os.environ.get(
         "WHISPER_MODEL", "~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin")),
     "transcribe_language": os.environ.get("TRANSCRIBE_LANGUAGE", "auto"),
+    "playback_device": os.environ.get("PHYSICSCLASS_PLAYBACK_DEVICE", ""),
+    "microphone_device": os.environ.get("PHYSICSCLASS_MICROPHONE_DEVICE", ""),
 }
 with open(f"{skill_dir}/config.json", "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
