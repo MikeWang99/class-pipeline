@@ -1,9 +1,9 @@
 ---
-name: physics-class-pipeline
+name: class-pipeline
 description: 物理教学课前/课中/课后全链路自动化。课前定时扫描日历生成备课笔记骨架；课中自动录制会议音频；课后基于转写文字稿准备反馈草稿与资料，由当前装了 Skill 的 AI 生成正式备课内容和家长反馈。触发词：备课、课前、上课、下课、课后、全链路、class pipeline。
 ---
 
-# Physics Class Pipeline · 物理教学全链路
+# Class Pipeline · 教学 Pipeline
 
 把「课前备课 → 课中录音 → 课后反馈/档案/作业」串成一条自动化流水线。语音转写固定使用本地 whisper.cpp Turbo 模型，不调用任何远程服务或 API；备课内容、课后反馈、档案更新、作业建议都由当前执行该 Skill 的 AI 负责。所有产出写入 Obsidian Vault 的「上课记录」分区。
 

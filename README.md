@@ -1,4 +1,4 @@
-# physics-class-pipeline
+# class-pipeline · 物理教学 Pipeline
 
 物理教学「课前 → 课中 → 课后」全链路自动化 skill（macOS）。
 
@@ -22,8 +22,8 @@
 ## 安装（新电脑）
 
 ```bash
-git clone https://github.com/<you>/physics-class-pipeline.git
-cd physics-class-pipeline
+git clone https://github.com/<you>/class-pipeline.git
+cd class-pipeline
 bash setup.sh
 ```
 
@@ -64,7 +64,7 @@ scripts/
   transcribe_audio.py     # 本地 Whisper Turbo 转写（自动分片）
 ```
 
-录音与文字稿存放在 `~/physics-class-pipeline-data/`，日志在其 `logs/` 子目录。只有正式家长反馈和学生档案更新成功后，才会删除对应 session 的 `audio.wav`，并在同目录写入 `audio_deleted.txt` 记录删除时间、路径和释放字节数；待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核。`transcript.txt` / `transcript.json` 会保留。本地 Whisper 只负责这一步的语音转写，不负责备课内容或课后反馈正文。文字稿现在会一律归档到 Vault 的 `上课记录/课堂文字稿/`，AI 所需素材也会一律写入 `上课记录/课后反馈草稿/`。日历临时不可用时，任务会标为“待AI识别学生”并保留到后续重试，不会再静默跳过。正式家长反馈与学生档案更新仍由装了该 skill 的 AI 完成；在 Codex 中应配置周期任务来自动消费这批待处理素材。
+录音与文字稿存放在 `~/class-pipeline-data/`，日志在其 `logs/` 子目录。只有正式家长反馈和学生档案更新成功后，才会删除对应 session 的 `audio.wav`，并在同目录写入 `audio_deleted.txt` 记录删除时间、路径和释放字节数；待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核。`transcript.txt` / `transcript.json` 会保留。本地 Whisper 只负责这一步的语音转写，不负责备课内容或课后反馈正文。文字稿现在会一律归档到 Vault 的 `上课记录/课堂文字稿/`，AI 所需素材也会一律写入 `上课记录/课后反馈草稿/`。日历临时不可用时，任务会标为“待AI识别学生”并保留到后续重试，不会再静默跳过。正式家长反馈与学生档案更新仍由装了该 skill 的 AI 完成；在 Codex 中应配置周期任务来自动消费这批待处理素材。
 
 开课和散会提醒同时使用通知横幅与 8 秒自动关闭的可见对话框，避免 macOS 静默抑制横幅时没有任何提示。可随时运行 `bash scripts/meeting_watcher.sh notify-test` 验证弹窗链路。
 

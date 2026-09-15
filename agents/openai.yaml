@@ -1,7 +1,7 @@
 interface:
-  display_name: "Physics Class Pipeline"
+  display_name: "教学 Pipeline"
   short_description: "物理课前备课、录音转写与课后反馈流水线"
-  default_prompt: "Use $physics-class-pipeline to prepare tomorrow's lesson notes or generate post-class feedback from a transcript."
+  default_prompt: "Use $class-pipeline to prepare tomorrow's lesson notes or generate post-class feedback from a transcript."
 
 policy:
   allow_implicit_invocation: true
