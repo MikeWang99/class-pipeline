@@ -357,7 +357,12 @@ check_audio_capture() {
   status=$(python3 -c "import json; print(json.load(open('$dir/audio_health.json')).get('status', 'unknown'))" 2>/dev/null || echo unknown)
   : > "$dir/audio_input_unhealthy"
   log "WARNING: audio source health check failed (status=$status, session=$dir)"
-  notify "audio-input-unhealthy" "录音已保留，但系统声或麦克风未被正确采集；已跳过错误转写和课后反馈"
+  case "$status" in
+    system_audio_missing) body="录音已保留：麦克风已采集，但系统播放声没有进入录音；已跳过错误转写和课后反馈" ;;
+    microphone_audio_missing) body="录音已保留：系统播放声已采集，但麦克风没有进入录音；已跳过错误转写和课后反馈" ;;
+    *) body="录音已保留：系统声和麦克风没有被完整采集；已跳过错误转写和课后反馈" ;;
+  esac
+  notify "audio-input-unhealthy" "$body"
   return 1
 }
 
@@ -511,6 +516,7 @@ log "watcher started (pid $$)"
 for marker in "$RECORD_DIR"/sessions/*/native_audio_required; do
   [ -f "$marker" ] || continue
   dir="$(dirname "$marker")"
+  [ -f "$dir/audio_input_unhealthy" ] && continue
   if [ ! -f "$dir/audio.wav" ] && ! pgrep -qf "$dir/system_audio.caf"; then
     log "adopting orphaned native recording: $dir"
     finalize_session "$dir" || true
@@ -549,6 +555,7 @@ while true; do
       for marker in "$RECORD_DIR"/sessions/*/native_audio_required; do
         [ -f "$marker" ] || continue
         dir="$(dirname "$marker")"
+        [ -f "$dir/audio_input_unhealthy" ] && continue
         if [ ! -f "$dir/audio.wav" ] && ! pgrep -qf "$dir/system_audio.caf"; then
           log "meeting over, finalizing orphaned native recording: $dir"
           finalize_session "$dir" || true
