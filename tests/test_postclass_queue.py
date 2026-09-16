@@ -42,7 +42,7 @@ class PostclassQueueTests(unittest.TestCase):
             )
 
             materials = list(
-                (vault / "上课记录" / "课后反馈锉迈").glob("*.md")
+                (vault / "上课记录" / "课后反馈草稿").glob("*.md")
             )
             self.assertEqual(len(materials), 1)
             text = materials[0].read_text(encoding="utf-8")
@@ -113,7 +113,7 @@ class PostclassQueueTests(unittest.TestCase):
                 "# Julien", encoding="utf-8"
             )
             feedback_dir = vault / "上课记录" / "课后反馈"
-            old = fedback_dir / "2026-08-07-Julien-feedback.md"
+            old = feedback_dir / "2026-08-07-Julien-feedback.md"
             recent = feedback_dir / "2026-08-24-Julien-feedback.md"
             old.write_text("旧反馈", encoding="utf-8")
             recent.write_text("最近反馈", encoding="utf-8")

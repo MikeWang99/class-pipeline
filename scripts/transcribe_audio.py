@@ -329,7 +329,7 @@ def main() -> None:
         "attempts": attempts,
         "status": "ok" if segments else "no_speech_after_retries",
     }
-    write_outputs(cutdir, segments, metadata)
+    write_outputs(outdir, segments, metadata)
 
     if not segments:
         raise RuntimeError(

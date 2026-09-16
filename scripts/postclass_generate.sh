@@ -180,7 +180,7 @@ ${TRANSCRIPT_SNIPPET}
 $(if [ "$TRANSCRIPT_QUALITY" = "usable" ]; then
     echo "转写包含可用于课堂分析的有效内容，且双路采集完整。"
   elif printf '%s' "$TRANSCRIPT_QUALITY" | grep -q '^audio_capture_degraded_'; then
-    echo "文字稿可用于人工恢复，但录音只捕获到一路音频（$AUDIO_CAPTURE_STATUS）；暂不生成正式反馈或更新学生档案。"
+    echo "文字稿可用于人工恢复，但录音只捕获到一路音频（${AUDIO_CAPTURE_STATUS}）；暂不生成正式反馈或更新学生档案。"
   else
     echo "自动转写或录音完整性不足，暂不生成正式反馈；请先确认录音输入链路。"
   fi)
