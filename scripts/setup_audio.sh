@@ -1,9 +1,9 @@
 #!/bin/bash
-# setup_audio.sh — install BlackHole and create the multi-output device used for meeting recording.
+# setup_audio.sh — install BlackHole and manage the existing multi-output device used for meeting recording.
 # Usage:
-#   bash setup_audio.sh install [playback device]  # install + bind multi-output
+#   bash setup_audio.sh install [playback device]  # install + create multi-output once
 #   bash setup_audio.sh check [playback device]    # verify audio chain is ready
-#   bash setup_audio.sh activate [playback device] # bind + set output before class
+#   bash setup_audio.sh activate [playback device] # select existing output before class
 #   bash setup_audio.sh ensure [playback device]   # rebuild this pipeline's multi-output device
 #   bash setup_audio.sh restore   # set system output back to the built-in/default device
 set -u
@@ -83,8 +83,9 @@ activate() {
   if command -v SwitchAudioSource >/dev/null 2>&1; then
     # Preserve the exact device selected before class; never guess on restore.
     SwitchAudioSource -c -t output > "$STATE_FILE"
-    [ -n "$playback" ] || playback=$(cat "$STATE_FILE" 2>/dev/null || true)
-    if ! create_multi_output "$playback"; then
+    if ! device_exists "$MO_NAME"; then
+      log "ERROR: '$MO_NAME' is missing; refusing to create it during class startup"
+      log "Run setup_audio.sh install once if this device is intentionally absent"
       return 1
     fi
     SwitchAudioSource -s "$MO_NAME" -t output && log "System output -> $MO_NAME"
@@ -142,6 +143,10 @@ install_audio() {
     return 0
   fi
   [ "$rc" = 0 ] || return "$rc"
+  if device_exists "$MO_NAME"; then
+    log "Multi-output device '$MO_NAME' already exists; leaving its membership unchanged."
+    return 0
+  fi
   create_multi_output "$playback"
 }
 

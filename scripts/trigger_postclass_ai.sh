@@ -19,6 +19,33 @@ log() {
   printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG"
 }
 
+cleanup_recording() {
+  local session_dir="$1" file bytes failed=0 deleted_file marker_tmp
+  local files=("$session_dir/audio.wav" "$session_dir/system_audio.caf" "$session_dir/microphone_audio.caf")
+  marker_tmp="$session_dir/.audio_deleted.txt.tmp"
+  : > "$marker_tmp"
+  printf 'deleted_at: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" >> "$marker_tmp"
+  printf 'reason: formal feedback and profile update completed\n' >> "$marker_tmp"
+  for file in "${files[@]}"; do
+    [ -e "$file" ] || continue
+    bytes=$(stat -f%z "$file" 2>/dev/null || echo 0)
+    if rm -f "$file"; then
+      printf 'deleted_file: %s\n' "$file" >> "$marker_tmp"
+      printf 'bytes: %s\n' "$bytes" >> "$marker_tmp"
+      log "deleted recording source after AI completion (session=$session_dir, file=$file, bytes=$bytes)"
+    else
+      failed=1
+      log "WARNING: failed to delete recording source after AI completion (session=$session_dir, file=$file)"
+    fi
+  done
+  if [ "$failed" -eq 0 ]; then
+    mv -f "$marker_tmp" "$session_dir/audio_deleted.txt"
+    return 0
+  fi
+  rm -f "$marker_tmp"
+  return 1
+}
+
 worker() {
   local session_dir="$1" material_file="$2"
   local lock_file="$session_dir/.ai_trigger.pid"
@@ -28,6 +55,7 @@ worker() {
   trap "unlink '$lock_file' 2>/dev/null || true" EXIT
 
   if [ -s "$session_dir/ai_completed.txt" ]; then
+    cleanup_recording "$session_dir" || true
     log "AI trigger skipped; session already complete: $session_dir"
     return 0
   fi
@@ -53,23 +81,10 @@ worker() {
       log "AI marker rejected; feedback/profile completion evidence is incomplete (session=$session_dir material=$material_file)"
       return 1
     fi
-    # Keep the source recording available while identity, transcript quality,
-    # or AI generation is pending. Delete it only after the formal feedback
+    # Keep all source channels available while identity, transcript quality,
+    # or AI generation is pending. Delete them only after the formal feedback
     # and profile update have been committed successfully.
-    if [ -f "$session_dir/audio.wav" ]; then
-      bytes=$(stat -f%z "$session_dir/audio.wav" 2>/dev/null || echo 0)
-      if rm -f "$session_dir/audio.wav"; then
-        {
-          printf 'deleted_at: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
-          printf 'deleted_file: %s\n' "$session_dir/audio.wav"
-          printf 'bytes: %s\n' "$bytes"
-          printf 'reason: formal feedback and profile update completed\n'
-        } > "$session_dir/audio_deleted.txt"
-        log "deleted audio after AI completion (session=$session_dir, bytes=$bytes)"
-      else
-        log "WARNING: failed to delete audio after AI completion (session=$session_dir)"
-      fi
-    fi
+    cleanup_recording "$session_dir" || true
     log "AI trigger completed: $session_dir"
     osascript \
       -e 'on run argv' \
@@ -99,7 +114,11 @@ LOCK_FILE="$SESSION_DIR/.ai_trigger.pid"
 
 [ -d "$SESSION_DIR" ] || { log "AI trigger rejected; no session: $SESSION_DIR"; exit 1; }
 [ -f "$MATERIAL_FILE" ] || { log "AI trigger rejected; no material: $MATERIAL_FILE"; exit 1; }
-[ -s "$SESSION_DIR/ai_completed.txt" ] && { log "AI trigger skipped; already complete: $SESSION_DIR"; exit 0; }
+[ -s "$SESSION_DIR/ai_completed.txt" ] && {
+  cleanup_recording "$SESSION_DIR" || true
+  log "AI trigger skipped; already complete: $SESSION_DIR"
+  exit 0
+}
 
 if [ -f "$LOCK_FILE" ]; then
   existing_pid="$(cat "$LOCK_FILE" 2>/dev/null || true)"

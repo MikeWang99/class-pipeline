@@ -2,7 +2,7 @@
 # meeting_watcher.sh — resident meeting detector + auto recorder + auto transcriber.
 #
 # Loops every 15s. When a meeting app is detected it starts recording
-# (BlackHole + microphone). When the meeting has been gone for 3 consecutive
+# the macOS system-audio and microphone streams. When the meeting has been gone for 3 consecutive
 # checks (~45s) it stops recording, transcribes via local Whisper Turbo, prepares
 # transcript/feedback draft materials, and posts a macOS notification.
 #
@@ -36,8 +36,8 @@ if [ -n "$WHISPER_MODEL_CFG" ]; then
   export WHISPER_MODEL="${WHISPER_MODEL_CFG/#\~/$HOME}"
 fi
 export TRANSCRIBE_LANGUAGE="$(cfg transcribe_language "auto")"
-PLAYBACK_DEVICE="$(cfg playback_device "")"
-MICROPHONE_DEVICE="$(cfg microphone_device "")"
+RECORDING_BACKEND="$(cfg recording_backend "native_system_and_microphone")"
+NATIVE_CAPTURE_APP="$HOME/Applications/PhysicsClassAudio.app/Contents/MacOS/PhysicsClassAudio"
 LOG_DIR="$RECORD_DIR/logs"
 mkdir -p "$RECORD_DIR/sessions" "$LOG_DIR"
 LOG="$LOG_DIR/watcher.log"
@@ -68,44 +68,6 @@ notify() {
       log "NOTIFY banner requested: $key"
     fi
   ) &
-}
-
-# ---------- audio device lookup ----------
-# launchd/background processes cannot see microphone devices until macOS grants
-# mic access to the responsible app. Actually opening a capture stream triggers
-# the system permission prompt, so try a 1-second capture; user approves once.
-mic_permission() {
-  local stamp="$LOG_DIR/.mic_perm_ok"
-  if [ -f "$stamp" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$(date '+%Y-%m-%d')" ]; then return 0; fi
-  ffmpeg -hide_banner -loglevel error -f avfoundation -i ":0" -t 1 -f null - >/dev/null 2>&1
-  echo "$(date '+%Y-%m-%d')" > "$stamp"
-}
-
-# one-shot self test at startup; setup.sh polls the log for these lines
-perm_selftest() {
-  if ffmpeg -hide_banner -loglevel error -f avfoundation -i ":0" -t 1 -f null - >/dev/null 2>&1; then
-    log "MIC PERMISSION: granted"
-  else
-    log "MIC PERMISSION: missing (waiting for user to click Allow in the system dialog)"
-  fi
-}
-
-# prints "blackhole_index mic_index" from ffmpeg avfoundation device list
-audio_indices() {
-  local listing bh mic
-  listing=$(ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1)
-  bh=$(echo "$listing" | grep -i "blackhole" | head -1 | grep -o '\[[0-9]*\]' | head -1 | tr -d '[]')
-  if [ -n "$MICROPHONE_DEVICE" ]; then
-    mic=$(echo "$listing" | grep -F "$MICROPHONE_DEVICE" | head -1 | grep -o '\[[0-9]*\]' | head -1 | tr -d '[]')
-  fi
-  # prefer physical mics; iPhone continuity mics stall and freeze amix
-  if [ -z "${mic:-}" ]; then
-    mic=$(echo "$listing" | grep -iE "外置|内置|built-in|macbook|microphone" | grep -vi "iphone" | head -1 | grep -o '\[[0-9]*\]' | head -1 | tr -d '[]')
-  fi
-  if [ -z "$mic" ]; then
-    mic=$(echo "$listing" | grep -iE "麦克风|microphone" | grep -vi "iphone" | head -1 | grep -o '\[[0-9]*\]' | head -1 | tr -d '[]')
-  fi
-  echo "${bh:-NONE} ${mic:-NONE}"
 }
 
 # ---------- meeting detection ----------
@@ -160,6 +122,9 @@ meeting_running() {
 # ---------- recording ----------
 SESSION=""
 FFPID=""
+SYSTEM_AUDIO_FILE=""
+MICROPHONE_AUDIO_FILE=""
+NATIVE_STATUS_FILE=""
 NOTIFY_STAMP=""
 MATCH_RETRY_STAMP=0
 
@@ -251,66 +216,61 @@ archive_transcript() {
 
 start_recording() {
   local platform="$1"
-  # dedupe: an orphaned ffmpeg (from a previous watcher instance) may already
-  # be recording this meeting — adopt it instead of starting a duplicate
+  # A native helper has one stable app identity so macOS TCC permissions remain
+  # attached to the capture process instead of changing with each shell call.
   local existing
-  existing=$(pgrep -f "ffmpeg.*$RECORD_DIR/sessions" | head -1 || true)
+  existing=$(pgrep -f "$RECORD_DIR/sessions/.*/system_audio.caf" | head -1 || true)
   if [ -n "$existing" ]; then
-    log "existing recording ffmpeg (pid $existing) found, adopting instead of duplicate start"
+    log "existing native recording (pid $existing) found, adopting instead of duplicate start"
     FFPID="$existing"
-    SESSION=$(ps -o command= -p "$existing" | grep -o "$RECORD_DIR/sessions/[^ ]*" | head -1 | xargs dirname)
+    SESSION=$(ps -o command= -p "$existing" | grep -o "$RECORD_DIR/sessions/[^ ]*" | head -1 | cut -d' ' -f1 | xargs dirname)
     MATCH_RETRY_STAMP=0
     lock_course_match "$SESSION" || true
     return 0
   fi
-  mic_permission
-  read -r BH MIC <<< "$(audio_indices)"
-  local inputs=() filters=() n=0
-  if [ "$BH" = "NONE" ] || [ "$MIC" = "NONE" ]; then
-    log "ERROR: incomplete audio inputs (BlackHole=$BH, microphone=$MIC); refusing to start recording"
-    log "DEBUG device listing follows:"
-    ffmpeg -hide_banner -f avfoundation -list_devices true -i "" >> "$LOG" 2>&1 || true
-    notify_throttled "no-input" "检测到开会但录音链路不完整：请检查 BlackHole 和麦克风权限，未确认前不会启动不完整录音"
+  if [ ! -x "$NATIVE_CAPTURE_APP" ]; then
+    log "ERROR: native audio capture app is missing: $NATIVE_CAPTURE_APP"
+    notify_throttled "no-input" "检测到开会，但原生录音组件未安装；请运行一次 setup.sh 完成录音组件安装"
     return 1
   fi
-  # Route meeting output before opening the capture stream. Starting ffmpeg
-  # first can leave the session recording only the microphone when the output
-  # switch takes effect a moment later.
-  if ! PHYSICSCLASS_PLAYBACK_DEVICE="$PLAYBACK_DEVICE" bash "$SCRIPT_DIR/setup_audio.sh" activate "$PLAYBACK_DEVICE" >> "$LOG" 2>&1; then
-    log "ERROR: meeting output routing unavailable; refusing to start recording without both sides of the class"
-    notify_throttled "audio-route" "检测到开会但会议音频路由未就绪：请启用 PhysicsClass Multi-Output 后再开始录音"
-    return 1
-  fi
-  inputs+=(-thread_queue_size 4096 -f avfoundation -i ":$BH"); filters+=("[$n:a]"); n=$((n+1))
-  inputs+=(-thread_queue_size 4096 -f avfoundation -i ":$MIC"); filters+=("[$n:a]"); n=$((n+1))
   SESSION="$RECORD_DIR/sessions/$(date '+%Y-%m-%d_%H%M%S')"
   MATCH_RETRY_STAMP=0
   mkdir -p "$SESSION"
   echo "$platform" > "$SESSION/platform.txt"
+  : > "$SESSION/native_audio_required"
+  SYSTEM_AUDIO_FILE="$SESSION/system_audio.caf"
+  MICROPHONE_AUDIO_FILE="$SESSION/microphone_audio.caf"
+  NATIVE_STATUS_FILE="$SESSION/system_audio_status.txt"
   printf '%s %s\n' "$(date '+%s')" "$(date '+%Y-%m-%d %H:%M:%S %z')" > "$SESSION/recording_started_at.txt"
-  local mix
-  if [ "$n" -eq 1 ]; then
-    mix="${filters[0]}acopy"
-  else
-    # Keep BlackHole and the microphone separate. A mixed mono file hides a
-    # failed system-audio route behind room noise, making it impossible to
-    # distinguish a bad recording from a Whisper error after class.
-    mix="[0:a]aresample=async=1:first_pts=0,pan=mono|c0=0.5*c0+0.5*c1[system];[1:a]aresample=async=1:first_pts=0,pan=mono|c0=c0[mic];[system][mic]amerge=inputs=2"
-  fi
-  ffmpeg -nostdin -y -hide_banner -loglevel error "${inputs[@]}" \
-    -filter_complex "$mix" -ac 2 -ar 44100 -c:a pcm_s16le \
-    "$SESSION/audio.wav" >> "$LOG" 2>&1 &
+  "$NATIVE_CAPTURE_APP" "$SYSTEM_AUDIO_FILE" "$MICROPHONE_AUDIO_FILE" "$NATIVE_STATUS_FILE" >> "$LOG" 2>&1 &
   FFPID=$!
   {
-    echo "blackhole_device: $BH"
-    echo "microphone_device: $MIC"
-    echo "configured_microphone: ${MICROPHONE_DEVICE:-auto}"
-    echo "playback_device: ${PLAYBACK_DEVICE:-previous default output}"
-    echo "system_output_route: PhysicsClass Multi-Output"
-    echo "channel_1: BlackHole system audio"
-    echo "channel_2: physical microphone"
+    echo "recording_backend: $RECORDING_BACKEND"
+    echo "system_audio_source: macOS ScreenCaptureKit system audio stream"
+    echo "microphone_source: macOS ScreenCaptureKit microphone stream"
+    echo "system_audio_file: $SYSTEM_AUDIO_FILE"
+    echo "microphone_audio_file: $MICROPHONE_AUDIO_FILE"
+    echo "native_capture_app: $NATIVE_CAPTURE_APP"
+    echo "audio_format: stereo WAV after merge (left=system, right=microphone)"
   } > "$SESSION/audio_route.txt"
-  log "RECORDING started (pid $FFPID, platform=$platform, session=$SESSION, bh=$BH mic=$MIC)"
+  local ready=0
+  for _ in $(seq 1 20); do
+    if [ -s "$NATIVE_STATUS_FILE" ]; then
+      if grep -q '^ready$' "$NATIVE_STATUS_FILE"; then ready=1; break; fi
+      if grep -q '^error:' "$NATIVE_STATUS_FILE"; then break; fi
+    fi
+    sleep 0.25
+  done
+  if [ "$ready" -ne 1 ]; then
+    log "ERROR: native audio capture did not become ready (session=$SESSION, status=$(cat "$NATIVE_STATUS_FILE" 2>/dev/null || echo missing))"
+    : > "$SESSION/audio_input_unhealthy"
+    notify_throttled "no-input" "检测到开会，但系统声音或麦克风原生采集未就绪；已阻止生成不可靠文字稿"
+    kill -TERM "$FFPID" 2>/dev/null || true
+    wait "$FFPID" 2>/dev/null || true
+    FFPID=""
+    return 1
+  fi
+  log "RECORDING started (pid $FFPID, platform=$platform, session=$SESSION, backend=$RECORDING_BACKEND)"
   notify "recording" "检测到开课，录音已开始"
   # Lock the course while calendar/prep metadata is available. Transcription can
   # take several minutes, so relying only on a post-class lookup is fragile.
@@ -318,18 +278,54 @@ start_recording() {
   MATCH_RETRY_STAMP=$(date +%s)
 }
 
+merge_native_audio() {
+  local dir="$1" rebuilt="$dir/audio.wav"
+  [ -s "$dir/system_audio.caf" ] && [ -s "$dir/microphone_audio.caf" ] || {
+    log "ERROR: native audio channel file missing (session=$dir)"
+    : > "$dir/audio_input_unhealthy"
+    return 1
+  }
+  ffmpeg -nostdin -y -hide_banner -loglevel error \
+    -i "$dir/system_audio.caf" -i "$dir/microphone_audio.caf" \
+    -filter_complex "[0:a]aresample=44100,pan=mono|c0=c0[system];[1:a]aresample=44100,pan=mono|c0=c0[mic];[system][mic]amerge=inputs=2[stereo]" \
+    -map "[stereo]" -ac 2 -ar 44100 -c:a pcm_s16le "$rebuilt" >> "$LOG" 2>&1 || {
+      log "ERROR: failed to merge native audio channels (session=$dir)"
+      : > "$dir/audio_input_unhealthy"
+      return 1
+    }
+  return 0
+}
+
+finalize_session() {
+  local dir="$1"
+  [ -d "$dir" ] || return 1
+  if [ -f "$dir/audio_input_unhealthy" ] && [ ! -s "$dir/system_audio.caf" ] && [ ! -s "$dir/microphone_audio.caf" ]; then
+    log "native recording already marked unavailable; leaving diagnostic session untouched (session=$dir)"
+    return 1
+  fi
+  if [ -f "$dir/native_audio_required" ] && [ ! -f "$dir/audio.wav" ]; then
+    merge_native_audio "$dir" || return 1
+  fi
+  printf '%s %s\n' "$(date '+%s')" "$(date '+%Y-%m-%d %H:%M:%S %z')" > "$dir/recording_stopped_at.txt"
+  check_recording_duration "$dir"
+  check_audio_capture "$dir" || true
+  check_transcription_preflight "$dir" || true
+  log "RECORDING finalized (session=$dir)"
+  transcribe_session "$dir"
+  return 0
+}
+
 stop_recording() {
   [ -z "$FFPID" ] && return
-  kill -INT "$FFPID" 2>/dev/null
+  kill -TERM "$FFPID" 2>/dev/null
   wait "$FFPID" 2>/dev/null
-  printf '%s %s\n' "$(date '+%s')" "$(date '+%Y-%m-%d %H:%M:%S %z')" > "$SESSION/recording_stopped_at.txt"
-  check_recording_duration "$SESSION"
-  check_audio_capture "$SESSION" || true
-  check_transcription_preflight "$SESSION" || true
-  log "RECORDING stopped (session=$SESSION)"
-  bash "$SCRIPT_DIR/setup_audio.sh" restore >> "$LOG" 2>&1 || true
-  transcribe_session "$SESSION"
-  FFPID=""; SESSION=""; MATCH_RETRY_STAMP=0
+  finalize_session "$SESSION" || true
+  FFPID=""
+  SESSION=""
+  SYSTEM_AUDIO_FILE=""
+  MICROPHONE_AUDIO_FILE=""
+  NATIVE_STATUS_FILE=""
+  MATCH_RETRY_STAMP=0
 }
 
 check_recording_duration() {
@@ -383,6 +379,14 @@ check_transcription_preflight() {
   log "WARNING: transcription preflight rejected audio content (session=$dir)"
   notify "audio-content-unhealthy" "录音已保留，但抽样转写重复异常；已跳过完整转写和课后反馈"
   return 1
+}
+
+perm_selftest() {
+  if [ -x "$NATIVE_CAPTURE_APP" ]; then
+    log "NATIVE AUDIO PERMISSION: checked when a class starts (ScreenCaptureKit + microphone)"
+  else
+    log "NATIVE AUDIO PERMISSION: capture app missing; run setup.sh"
+  fi
 }
 
 transcribe_session() {
@@ -503,7 +507,17 @@ fi
 
 # daemon loop
 log "watcher started (pid $$)"
-# crash recovery: transcribe orphaned recordings left by a previous instance
+# Crash recovery for native sessions left by a previous watcher instance.
+for marker in "$RECORD_DIR"/sessions/*/native_audio_required; do
+  [ -f "$marker" ] || continue
+  dir="$(dirname "$marker")"
+  if [ ! -f "$dir/audio.wav" ] && ! pgrep -qf "$dir/system_audio.caf"; then
+    log "adopting orphaned native recording: $dir"
+    finalize_session "$dir" || true
+  fi
+done
+# Compatibility recovery: transcribe old BlackHole recordings left by a
+# previous version. New recordings never use this path.
 for f in "$RECORD_DIR"/sessions/*/audio.wav; do
   [ -f "$f" ] || continue
   if ! pgrep -qf "ffmpeg.*$(basename "$(dirname "$f")")"; then
@@ -520,7 +534,9 @@ while true; do
     if [ -n "$FFPID" ] && ! kill -0 "$FFPID" 2>/dev/null; then
       log "ERROR: recording process exited unexpectedly (pid=$FFPID, session=$SESSION)"
       notify "recording-error" "录音进程意外中断，已保留当前片段并尝试恢复"
+      finalize_session "$SESSION" || true
       FFPID=""
+      SESSION=""
     fi
     [ -z "$FFPID" ] && start_recording "$platform"
     [ -n "$FFPID" ] && retry_course_match
@@ -530,6 +546,14 @@ while true; do
       if [ "$miss" -ge "$MISS_LIMIT" ]; then stop_recording; fi
     else
       # meeting gone and we hold no recording — finalize any orphaned one
+      for marker in "$RECORD_DIR"/sessions/*/native_audio_required; do
+        [ -f "$marker" ] || continue
+        dir="$(dirname "$marker")"
+        if [ ! -f "$dir/audio.wav" ] && ! pgrep -qf "$dir/system_audio.caf"; then
+          log "meeting over, finalizing orphaned native recording: $dir"
+          finalize_session "$dir" || true
+        fi
+      done
       for f in "$RECORD_DIR"/sessions/*/audio.wav; do
         [ -f "$f" ] || continue
         if ! pgrep -qf "ffmpeg.*$(basename "$(dirname "$f")")" && [ ! -f "$(dirname "$f")/transcript.txt" ]; then

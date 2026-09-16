@@ -3,12 +3,12 @@
 #
 # Steps:
 #   1. dependency check (brew / ffmpeg / python3 / swift)
-#   2. install BlackHole 2ch virtual audio device + create multi-output device
+#   2. prepare the native macOS audio capture helper
 #   3. detect Obsidian vault (search common locations, take first .obsidian dir)
 #   4. check the local Whisper Turbo model
 #   5. write config.json
 #   6. register two launchd jobs: daily pre-class scan + resident meeting watcher
-#   7. link the skill into ~/.qoder/skills and ~/.codex/skills
+#   7. link the skill into ~/.codex/skills
 #
 # Re-running is safe (idempotent). Uninstall with uninstall.sh.
 set -u
@@ -62,6 +62,44 @@ EOF
   echo "$app"
 }
 
+# ScreenCaptureKit provides the current system playback stream and the current
+# microphone stream directly. Keep this helper in a stable app bundle so the
+# user's macOS TCC grants survive watcher restarts.
+make_native_capture_app() {
+  local app="$HOME/Applications/PhysicsClassAudio.app"
+  local binary="$app/Contents/MacOS/PhysicsClassAudio"
+  local changed=0
+  mkdir -p "$app/Contents/MacOS"
+  if [ ! -x "$binary" ] || [ "$SKILL_DIR/scripts/capture_native_audio.swift" -nt "$binary" ]; then
+    swiftc "$SKILL_DIR/scripts/capture_native_audio.swift" -o "$binary" || return 1
+    chmod +x "$binary"
+    changed=1
+  fi
+  if [ ! -f "$app/Contents/Info.plist" ]; then
+    cat > "$app/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.physicsclass.audio-capture</string>
+  <key>CFBundleName</key><string>PhysicsClassAudio</string>
+  <key>CFBundleExecutable</key><string>PhysicsClassAudio</string>
+  <key>CFBundleVersion</key><string>1.0</string>
+  <key>NSMicrophoneUsageDescription</key><string>录制在线课程音频，以便生成课堂文字稿。</string>
+  <key>NSScreenCaptureUsageDescription</key><string>采集在线课程的系统播放声音，以便生成完整课堂文字稿。</string>
+  <key>NSAudioCaptureUsageDescription</key><string>采集在线课程的系统播放声音，以便生成完整课堂文字稿。</string>
+  <key>LSUIElement</key><true/>
+</dict></plist>
+EOF
+    changed=1
+  fi
+  if [ "$changed" -eq 1 ]; then
+    codesign --force --sign - "$app" >/dev/null 2>&1 || true
+  fi
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+    -f "$app" >/dev/null 2>&1 || true
+  printf '%s\n' "$app"
+}
+
 # ---------- 1. dependencies ----------
 step "1/7 依赖检查"
 if ! command -v brew >/dev/null 2>&1; then
@@ -83,9 +121,11 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
   fail "请先安装缺失依赖后重跑本脚本"; exit 1
 fi
 
-# ---------- 2. audio chain ----------
-step "2/7 音频链路（BlackHole + 多输出设备）"
-bash "$SKILL_DIR/scripts/setup_audio.sh" install || warn "音频链路安装未完成，可稍后运行 scripts/setup_audio.sh install 补齐"
+# ---------- 2. native audio capture ----------
+step "2/7 原生音频采集组件"
+APP_AUDIO="$(make_native_capture_app)" || { fail "原生音频采集组件编译失败"; exit 1; }
+ok "系统声音 + 麦克风双路采集：$APP_AUDIO"
+ok "不依赖 BlackHole、Multi-Output 或固定的扬声器名称"
 
 # ---------- 3. vault detection ----------
 step "3/7 探测 Obsidian Vault"
@@ -123,11 +163,10 @@ cfg = {
     "scan_hour": int(hour),
     "scan_minute": int(minute),
     "transcribe_backend": "local",
+    "recording_backend": "native_system_and_microphone",
     "whisper_model": os.path.expanduser(os.environ.get(
         "WHISPER_MODEL", "~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin")),
     "transcribe_language": os.environ.get("TRANSCRIBE_LANGUAGE", "auto"),
-    "playback_device": os.environ.get("PHYSICSCLASS_PLAYBACK_DEVICE", ""),
-    "microphone_device": os.environ.get("PHYSICSCLASS_MICROPHONE_DEVICE", ""),
 }
 with open(f"{skill_dir}/config.json", "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -147,7 +186,7 @@ mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Applications"
 
 APP_WATCH="$(make_app "PhysicsClassWatcher" "com.physicsclass.watcher" "bash '$SKILL_DIR/scripts/meeting_watcher.sh'")"
 APP_SCAN="$(make_app "PhysicsClassScanner" "com.physicsclass.scanner" "/usr/bin/python3 '$SKILL_DIR/scripts/preclass_scan.py'")"
-ok "后台应用已创建：PhysicsClassWatcher（录音监听）/ PhysicsClassScanner（课前扫描）"
+ok "后台应用已创建：PhysicsClassWatcher（录音监听）/ PhysicsClassScanner（课前扫描）/ PhysicsClassAudio（原生采集）"
 
 cat > "$PLIST_SCAN" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -190,36 +229,19 @@ launchctl unload "$PLIST_WATCH" 2>/dev/null; launchctl load "$PLIST_WATCH"
 ok "每日 $SCAN_HOUR:${SCAN_MINUTE}0 课前扫描（com.physicsclass.preclass-scan）"
 ok "常驻会议监听（com.physicsclass.meeting-watcher）"
 
-# guided one-time microphone authorization
 echo
-echo "  ⏳ 正在启动监听程序并申请麦克风权限……"
-echo "  👉 屏幕上会弹出系统窗口「PhysicsClassWatcher 想要访问麦克风」——请点击【允许】（仅此一次，之后全自动）"
-LOGF="$DATA_DIR/logs/watcher.log"
-BASE=$(wc -l < "$LOGF" 2>/dev/null || echo 0)
-GRANTED=0
-for _ in $(seq 1 60); do
-  if tail -n +"$((BASE+1))" "$LOGF" 2>/dev/null | grep -q "MIC PERMISSION: granted"; then GRANTED=1; break; fi
-  sleep 2
-done
-if [ "$GRANTED" = 1 ]; then
-  ok "麦克风授权成功"
-else
-  warn "还没检测到授权完成。若未看到弹窗：打开 系统设置 → 隐私与安全性 → 麦克风，把 PhysicsClassWatcher 打开即可；完成后会自动生效。"
-fi
+echo "  首次开始录课时，macOS 可能会分别请求 PhysicsClassAudio 的【麦克风】和【屏幕与系统音频录制】权限。请点击【允许】。"
+echo "  如果之前拒绝过：打开 系统设置 → 隐私与安全性 → 麦克风 / 屏幕与系统音频录制，启用 PhysicsClassAudio。"
 
 # ---------- 7. skill install ----------
 step "7/7 安装 skill 到 AI 助手"
-for dest in "$HOME/.qoder/skills" "$HOME/.codex/skills"; do
-  mkdir -p "$dest"
-  ln -sfn "$SKILL_DIR" "$dest/physics-class-pipeline"
-  ok "$dest/physics-class-pipeline -> $SKILL_DIR"
-done
+dest="$HOME/.codex/skills"
+mkdir -p "$dest"
+ln -sfn "$SKILL_DIR" "$dest/physics-class-pipeline"
+ok "$dest/physics-class-pipeline -> $SKILL_DIR"
 
 echo
 echo "================ 安装完成 ================"
-if ! system_profiler SPAudioDataType 2>/dev/null | grep -qi "blackhole"; then
-  echo "  ⚠️  BlackHole 尚未生效：重启 Mac 后再跑一次 bash $SKILL_DIR/setup.sh 完成音频链路"
-fi
 echo "  config.json : $SKILL_DIR/config.json"
 echo "  录音目录    : $DATA_DIR"
 echo "  日志        : $DATA_DIR/logs/"

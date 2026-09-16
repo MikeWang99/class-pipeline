@@ -14,8 +14,7 @@ description: 物理教学课前/课中/课后全链路自动化。课前定时�
   - `recordings_dir`：录音/文字稿工作目录（默认 `~/physics-class-pipeline-data`）
   - `calendar_keyword`：日历事件识别关键词（默认 `Class`）
   - `scan_hour` / `scan_minute`：每日课前扫描时间（默认 10:00）
-  - `playback_device`：上课实际使用的扬声器名称；本机固定为 `Mac mini扬声器`。Watcher 会在每节课开始前用它和 BlackHole 重建多输出设备，避免旧的显示器/耳机配置被复用。
-  - `microphone_device`：优先使用的物理麦克风名称；留空时才自动选择。
+  - `recording_backend`：固定为 `native_system_and_microphone`，表示使用 macOS 原生系统声音与麦克风双路采集，不绑定设备名称。
 - **笔记根目录**：`{vault_path}/上课记录/`，下设四个子分区：
   - `备课内容/`、`课堂文字稿/`、`课后反馈/`、`课后反馈草稿/`、`学生档案/`
 - **文件命名**：`YYYY-MM-DD {体系} Class-{学生}.md`（学生档案固定为 `{学生}.md`，累积更新）
@@ -23,6 +22,7 @@ description: 物理教学课前/课中/课后全链路自动化。课前定时�
 - 读取配置后再干活；`config.json` 不存在时提示用户先运行 `setup.sh`。
 - 所有脚本在 `scripts/` 下，用绝对路径调用。
 - **转写后端**：`scripts/transcribe_audio.py` 固定使用本地 whisper.cpp，默认模型为 `~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin`（多语言 Q5 量化版）；也可用 `WHISPER_MODEL` 指定其他本地模型，`TRANSCRIBE_LANGUAGE=zh`、`en` 或 `auto` 指定语言。不会读取 API key，也不会联网转写。
+- **系统声音采集**：课中使用 macOS 原生 ScreenCaptureKit，同时采集当前系统播放声音和当前麦克风输入，分别保存为 `system_audio.caf` 与 `microphone_audio.caf`，散会后合成为 `audio.wav`（左声道为系统声，右声道为麦克风）。不依赖 BlackHole、Multi-Output、HDMI 或固定的扬声器/麦克风名称。首次运行需要给 `PhysicsClassAudio` 一次“麦克风”和“屏幕与系统音频录制”权限。
 
 ## 1. 首次安装（闭环）
 
@@ -32,7 +32,7 @@ description: 物理教学课前/课中/课后全链路自动化。课前定时�
 bash {skill_dir}/setup.sh
 ```
 
-setup.sh 会自动完成：依赖检查（brew/ffmpeg 缺则自动装/python3/swift）→ 安装 BlackHole 虚拟声卡（需重启一次，重启后重跑 setup.sh）→ 尝试创建多输出音频设备（新系统可能失败，会提示手动替代方案，不阻塞安装）→ 探测 Obsidian Vault → 检查本地 Whisper Turbo 模型 → 创建后台应用 PhysicsClassWatcher/PhysicsClassScanner 并注册两个 launchd 任务（每日 10:00 课前扫描 + 常驻会议监听）→ 自动弹出系统麦克风授权窗口并等待用户点一次「允许」→ 安装 skill 到 `~/.qoder/skills` 与 `~/.codex/skills`。全程打印每一步结果。卸载用 `uninstall.sh`。
+setup.sh 会自动完成：依赖检查（brew/ffmpeg/python3/swift）→ 编译并注册原生 `PhysicsClassAudio` 采集助手 → 探测 Obsidian Vault → 检查本地 Whisper Turbo 模型 → 创建后台应用 PhysicsClassWatcher/PhysicsClassScanner 并注册两个 launchd 任务（每日 10:00 课前扫描 + 常驻会议监听）→ 安装 skill 到 `~/.codex/skills`。首次开始录课时按 macOS 提示授予采集权限。全程打印每一步结果。卸载用 `uninstall.sh`。
 
 ## 2. 课前：备课内容生成
 
@@ -56,8 +56,8 @@ setup.sh 会自动完成：依赖检查（brew/ffmpeg 缺则自动装/python3/sw
 launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 
 - **覆盖平台**：Zoom（zoom.us）、腾讯会议（wemeetapp/xmeet）、钉钉、飞书、Google Meet（Chrome/Safari 打开 meet.google.com 标签页）
-- **检测到开课**：先按 `playback_device` 动态重建 `PhysicsClass Multi-Output`（指定扬声器 + BlackHole），再自动录制。录音左声道保留 BlackHole 系统声，右声道保留物理麦克风，存入 `{recordings_dir}/sessions/{YYYY-MM-DD_HHMM}/audio.wav`。
-- **检测到散会**（连续 45 秒无会议进程）：停止录音 → 先写入 `audio_health.json` 检查系统声和麦克风是否实际采集到；长录音还会写入 `transcription_preflight.json`，用本地 Turbo 抽样排除重复幻听。任一检查失败时，保留音频、写明故障并跳过完整转写和反馈；健康时才使用本地 Whisper Turbo 转写 → 文字稿存 `transcript.txt` → **无论是否匹配到日历，都会先把文字稿归档到 Vault 的 `课堂文字稿/`** → 创建课后反馈待处理素材并交给当前 AI；只有正式反馈和学生档案更新成功后才删除对应的 `audio.wav`（写入 `audio_deleted.txt` 删除记录），待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核
+- **检测到开课**：启动 `PhysicsClassAudio`，分别捕获系统播放声和麦克风声；散会后合并成 `{recordings_dir}/sessions/{YYYY-MM-DD_HHMM}/audio.wav`。录音过程不检查 BlackHole、Multi-Output 或设备名称，任一原生采集通道未就绪时会保留诊断状态并阻止不可靠转写。
+- **检测到散会**（连续 45 秒无会议进程）：停止录音 → 写入 `audio_health.json` 检查文件是否为空，并对长录音写入 `transcription_preflight.json`，用本地 Turbo 抽样排除重复幻听。检查失败时保留音频、写明故障并跳过完整转写和反馈；健康时才使用本地 Whisper Turbo 转写 → 文字稿存 `transcript.txt` → **无论是否匹配到日历，都会先把文字稿归档到 Vault 的 `课堂文字稿/`** → 创建课后反馈待处理素材并交给当前 AI；只有正式反馈和学生档案更新成功后才删除 `audio.wav` 及两份原始 `.caf` 通道（写入 `audio_deleted.txt` 删除记录），待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核
 - **课程身份锁定**：开课时立即按 session 时间匹配日历；若 EventKit 或 iCloud 当时短暂不可用，录音期间每 60 秒重试，直到将 `{SYSTEM}|{STUDENT}` 写入 `calendar_match.txt`
 
 用户无需任何手动操作。若用户说「开始上课/手动录音」，可直接运行 `bash {skill_dir}/scripts/meeting_watcher.sh once` 强制走一轮录音+转写。
@@ -66,7 +66,7 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 
 散会后 watcher 自动完成以下步骤：
 
-1. **归档文字稿与清理音频**：转写成功后，一律将 `transcript.txt` 加 front matter（日期/学生/体系/时长/是否匹配课程/文字稿来源/原始音频路径/音频保留策略）归档到 `{vault}/上课记录/课堂文字稿/`。若匹配到课程，则文件名为 `{YYYY-MM-DD} {体系} Class-{学生}.md`；若未匹配到课程，则文件名降级为 `{YYYY-MM-DD} 未匹配 Class-Session-{时戳}.md`，至少保证课堂文字稿不会丢。反馈素材生成和 AI 复核前先检查转写质量；只有正式反馈和学生档案更新成功后才删除 `audio.wav`，并写入 `audio_deleted.txt` 删除记录。若文字稿主要是环境声、`multiple voices` 等占位标签，素材标记为“待人工确认录音”，不触发 AI、不删除原音频
+1. **归档文字稿与清理音频**：转写成功后，一律将 `transcript.txt` 加 front matter（日期/学生/体系/时长/是否匹配课程/文字稿来源/原始音频路径/音频保留策略）归档到 `{vault}/上课记录/课堂文字稿/`。若匹配到课程，则文件名为 `{YYYY-MM-DD} {体系} Class-{学生}.md`；若未匹配到课程，则文件名降级为 `{YYYY-MM-DD} 未匹配 Class-Session-{时戳}.md`，至少保证课堂文字稿不会丢。反馈素材生成和 AI 复核前先检查转写质量；只有正式反馈和学生档案更新成功后才删除 `audio.wav` 及两份 `.caf` 原始通道，并写入 `audio_deleted.txt` 删除记录。若文字稿主要是环境声、`multiple voices` 等占位标签，素材标记为“待人工确认录音”，不触发 AI、不删除原音频
 2. **自动准备反馈草稿素材**（无论日历是否临时可用）：`postclass_generate.sh` 读取转写稿 + 学生档案 + 上次反馈，生成一个待 AI 填写的反馈素材文件。已匹配时写入 `{vault}/上课记录/课后反馈草稿/{YYYY-MM-DD}-{学生}-feedback-materials.md`；未匹配时以 session 标识进入同一目录并标记为“待AI识别学生”，不能跳过。该素材稿只负责把来源材料和固定结构铺好，不负责生成正式反馈正文，也不会由 watcher 直接改写学生档案。学生名会做清洗并与档案模糊匹配（防日历标题污染）
 3. **事件式触发当前 AI**：素材生成后立即运行 `trigger_postclass_ai.sh`，只启动一次本机 `codex exec`。该 Codex 必须读取完整文字稿、学生档案、最近反馈和 `docs/feedback-spec.md`，然后生成正式反馈、更新档案并写入 `ai_completed.txt`。它是课后事件触发，不是每 15 分钟轮询
 
@@ -99,11 +99,12 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 
 | 现象 | 处理 |
 |---|---|
-| 录音文件无声/只有单方 | 确认 `config.json` 的 `playback_device` 是实际扬声器（本机为 `Mac mini扬声器`），并运行 `scripts/setup_audio.sh ensure "Mac mini扬声器"` 重建绑定。每节课结束后查看 session 的 `audio_health.json`：它会明确标出系统声、麦克风或两者均缺失；此类课程会自动保留音频并跳过错误转写。 |
+| 录音文件无声/只有单方 | 先查看 session 的 `audio_health.json`、`audio_route.txt` 与 `system_audio_status.txt`，确认 `PhysicsClassAudio` 已获得“麦克风”和“屏幕与系统音频录制”权限。此类课程会自动保留诊断文件并跳过错误转写。 |
 | 录音时长明显短于实际课程 | 检查 `recording_started_at.txt`、`recording_stopped_at.txt` 与 `recording_incomplete`；先修复音频路由，再重新上课，不能拿不完整录音生成反馈 |
 | 没检测到开会 | 运行 `bash scripts/meeting_watcher.sh once` 看检测日志；浏览器开 Meet 需在 Chrome/Safari 且标签页可见 |
-| 日志报 `MIC PERMISSION: missing` | 麦克风未授权：打开 系统设置→隐私与安全性→麦克风，把 PhysicsClassWatcher 打开（或重跑 setup.sh 触发弹窗） |
+| 原生采集权限未通过 | 打开 系统设置→隐私与安全性→麦克风，以及“屏幕与系统音频录制”，把 `PhysicsClassAudio` 打开后重新测试 |
 | 转写失败 | 先看 `{recordings_dir}/logs/watcher.log`；确认 `/opt/homebrew/bin/whisper-cli` 与 `~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin` 存在，或设置 `WHISPER_CLI` / `WHISPER_MODEL` 指向本地安装 |
-| 文字稿只有环境声或占位标签 | 反馈素材会标记为“待人工确认录音”，不会调用 AI 生成反馈，也不会删除原始音频；先检查 BlackHole / 多输出设备和会议 App 的扬声器设置 |
+| 文字稿只有环境声或占位标签 | 反馈素材会标记为“待人工确认录音”，不会调用 AI 生成反馈，也不会删除原始音频；先检查 `system_audio_status.txt` 和系统音频录制权限 |
+| 录音只有教师声音或出现重复幻听 | 检查 `audio_route.txt`、`audio_health.json` 和两份 `.caf` 原始通道；确认 `PhysicsClassAudio` 的系统音频录制权限已打开。Pipeline 会保留音频并跳过不可靠转写。 |
 | 定时任务没跑 | `launchctl list \| grep physicsclass` 确认任务在；plist 在 `~/Library/LaunchAgents/` |
 | 明明 UI 里有 Google 日历事件，但脚本没扫到 | 先确认系统“日历”权限已给 PhysicsClassScanner；查询脚本会重试 EventKit，并使用后台 AppleScript 读取 Calendar 数据，课后再优先回退到备课笔记里的 `event_start` 元数据做匹配；不会为了刷新权限主动打开 Calendar 窗口 |

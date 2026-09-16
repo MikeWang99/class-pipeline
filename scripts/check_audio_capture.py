@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Validate the separate system-audio and microphone channels in a recording.
+"""Validate the separate native system-audio and microphone channels.
 
-New recordings store BlackHole in the left channel and the physical microphone
-in the right channel. A normal file duration cannot prove that either source
-was present, so this check gates expensive transcription when an input was
-silent or disconnected.
+New recordings store macOS system audio in the left channel and the active
+microphone in the right channel. A normal file duration cannot prove that
+either source was present, so this check gates transcription when a channel
+was silent or disconnected.
 """
 from __future__ import annotations
 
@@ -42,15 +42,30 @@ def rms_for_channel(audio: Path, channel: int) -> float | None:
     return float("-inf") if value == "-inf" else float(value)
 
 
-def assess(audio: Path) -> dict[str, object]:
+def assess(audio: Path, system_only: bool = False) -> dict[str, object]:
     channels = probe_channels(audio)
     result: dict[str, object] = {
         "audio": str(audio),
         "channels": channels,
         "threshold_rms_db": SILENT_RMS_DB,
     }
+    if system_only:
+        system_rms = rms_for_channel(audio, 0)
+        result["system_rms_db"] = system_rms
+        result["status"] = "healthy" if system_rms is not None and system_rms > SILENT_RMS_DB else "system_audio_missing"
+        result["action"] = "transcribe" if result["status"] == "healthy" else "hold_for_audio_repair"
+        return result
     if channels < 2:
+        mixed_rms = rms_for_channel(audio, 0)
+        if mixed_rms is None or mixed_rms <= SILENT_RMS_DB:
+            result.update({
+                "mixed_rms_db": mixed_rms,
+                "status": "no_capturable_audio",
+                "action": "hold_for_audio_repair",
+            })
+            return result
         result.update({
+            "mixed_rms_db": mixed_rms,
             "status": "legacy_mixed_audio",
             "action": "allow_transcription_with_existing_quality_gate",
         })
@@ -78,10 +93,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("audio", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--system-only", action="store_true")
     args = parser.parse_args()
     if not args.audio.is_file():
         parser.error(f"audio file not found: {args.audio}")
-    report = assess(args.audio)
+    report = assess(args.audio, system_only=args.system_only)
     rendered = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
     if args.output:
         args.output.write_text(rendered, encoding="utf-8")

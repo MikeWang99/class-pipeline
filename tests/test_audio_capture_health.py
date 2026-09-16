@@ -12,10 +12,11 @@ SCRIPT = ROOT / "scripts" / "check_audio_capture.py"
 
 
 class AudioCaptureHealthTests(unittest.TestCase):
-    def run_check(self, audio: Path) -> tuple[int, dict]:
+    def run_check(self, audio: Path, system_only: bool = False) -> tuple[int, dict]:
         report = audio.with_suffix(".json")
+        extra = ["--system-only"] if system_only else []
         result = subprocess.run(
-            ["python3", str(SCRIPT), str(audio), "--output", str(report)],
+            ["python3", str(SCRIPT), str(audio), *extra, "--output", str(report)],
             capture_output=True,
             text=True,
         )
@@ -60,6 +61,26 @@ class AudioCaptureHealthTests(unittest.TestCase):
             rc, report = self.run_check(audio)
             self.assertEqual(rc, 0)
             self.assertEqual(report["status"], "legacy_mixed_audio")
+
+    def test_rejects_silent_legacy_mono_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "silent.wav"
+            subprocess.run(
+                ["ffmpeg", "-nostdin", "-y", "-v", "error", "-f", "lavfi", "-i",
+                 "anullsrc=r=16000:cl=mono", "-t", "1", "-c:a", "pcm_s16le", str(audio)],
+                check=True,
+            )
+            rc, report = self.run_check(audio)
+            self.assertEqual(rc, 1)
+            self.assertEqual(report["status"], "no_capturable_audio")
+
+    def test_system_only_mode_checks_the_first_channel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "system.caf"
+            self.make_stereo(audio, "sine=frequency=330:r=16000", "anullsrc=r=16000:cl=mono")
+            rc, report = self.run_check(audio, system_only=True)
+            self.assertEqual(rc, 0)
+            self.assertEqual(report["status"], "healthy")
 
 
 if __name__ == "__main__":

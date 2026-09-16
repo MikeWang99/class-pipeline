@@ -122,8 +122,8 @@ def audio_channels(source: str) -> int:
 
 
 def conversion_filter(channels: int) -> str:
-    # New pipeline recordings are stereo: left = BlackHole system audio,
-    # right = teacher microphone. Blend the sources only for transcription,
+    # New pipeline recordings are stereo: left = native system audio,
+    # right = microphone. Blend the sources only for transcription,
     # after retaining the raw channels for diagnostics.
     source_mix = "pan=mono|c0=0.707*c0+0.707*c1" if channels >= 2 else "acopy"
     return f"{source_mix},highpass=f=70,dynaudnorm=f=150:g=15:p=0.95"

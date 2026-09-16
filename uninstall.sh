@@ -1,6 +1,6 @@
 #!/bin/bash
 # uninstall.sh — remove all background jobs and skill links created by setup.sh.
-# Keeps: BlackHole, recordings/data dir, Vault notes (delete manually if wanted).
+# Keeps: recordings/data dir and Vault notes (delete manually if wanted).
 set -u
 
 PLIST_SCAN="$HOME/Library/LaunchAgents/com.physicsclass.preclass-scan.plist"
@@ -22,12 +22,11 @@ done
 
 echo "==> 移除后台应用"
 pkill -f "physics-class-pipeline/scripts/meeting_watcher.sh" 2>/dev/null
-for app in "$HOME/Applications/PhysicsClassWatcher.app" "$HOME/Applications/PhysicsClassScanner.app"; do
+for app in "$HOME/Applications/PhysicsClassWatcher.app" "$HOME/Applications/PhysicsClassScanner.app" "$HOME/Applications/PhysicsClassAudio.app"; do
   if [ -d "$app" ]; then rm -rf "$app"; echo "  removed: $app"; fi
 done
 
 echo
 echo "完成。以下内容未删除（如需彻底清理请手动处理）："
-echo "  - BlackHole 虚拟声卡（brew uninstall --cask blackhole-2ch）"
 echo "  - 录音与文字稿目录 ~/physics-class-pipeline-data"
 echo "  - Obsidian Vault 中的「上课记录」笔记"
