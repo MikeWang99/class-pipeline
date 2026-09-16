@@ -121,6 +121,27 @@ if [ "$TRANSCRIPT_QUALITY" = "usable" ]; then
   fi
 fi
 
+# Capture completeness and transcript quality are different facts.  A lesson
+# with only one native source can still yield a useful recovery transcript, but
+# it must never silently update the long-term student ledger or generate a
+# confident parent report.
+AUDIO_CAPTURE_STATUS="unknown"
+AUDIO_CAPTURE_ACTION="unknown"
+if [ -s "$SESSION_DIR/audio_health.json" ]; then
+  AUDIO_CAPTURE_STATUS=$(python3 -c "import json; d=json.load(open('$SESSION_DIR/audio_health.json')); print(d.get('status','unknown'))" 2>/dev/null || echo unknown)
+  AUDIO_CAPTURE_ACTION=$(python3 -c "import json; d=json.load(open('$SESSION_DIR/audio_health.json')); print(d.get('action','unknown'))" 2>/dev/null || echo unknown)
+fi
+case "$AUDIO_CAPTURE_STATUS" in
+  system_audio_missing|microphone_audio_missing)
+    TRANSCRIPT_QUALITY="audio_capture_degraded_${AUDIO_CAPTURE_STATUS}"
+    MATERIAL_STATUS="待人工确认录音"
+    ;;
+  no_capturable_audio)
+    TRANSCRIPT_QUALITY="audio_capture_failed"
+    MATERIAL_STATUS="待人工确认录音"
+    ;;
+esac
+
 cat > "$OUTFILE" <<EOF
 ---
 date: $DATE
@@ -129,6 +150,8 @@ system: $SYSTEM
 status: $MATERIAL_STATUS
 calendar_match_status: $MATCH_STATUS
 transcript_quality: $TRANSCRIPT_QUALITY
+audio_capture_status: $AUDIO_CAPTURE_STATUS
+audio_capture_action: $AUDIO_CAPTURE_ACTION
 source_transcript: $TRANSCRIPT_ARCHIVE
 source_profile: ${PROFILE:-（未匹配到学生档案）}
 source_previous_feedback: ${PREV_FILE:-（无）}
@@ -142,6 +165,7 @@ generated_by: material-pipeline-only
 - 本地 Whisper 仅负责转写，不参与备课或反馈正文写作
 - 正式反馈需遵循本 Skill 的固定格式与措辞要求，尤其要直接写学生名字，避免泛泛写“学生”
 - 如果 status 为“待AI识别学生”，先按 session 开始时间重新查询日历；日历暂时不可用时保留队列，不能跳过或猜学生
+- 如果 status 为“待人工确认录音”，不得生成正式家长反馈、不得更新学生问题台账、不得删除原始音频
 
 ## 学生档案摘要
 ${PROFILE_TEXT:-（未匹配到学生档案）}
@@ -153,7 +177,13 @@ ${PREV_FEEDBACK:-（无历史记录）}
 ${TRANSCRIPT_SNIPPET}
 
 ## 转写质量检查
-$(if [ "$TRANSCRIPT_QUALITY" = "usable" ]; then echo "转写包含可用于课堂分析的有效内容。"; else echo "自动转写主要由环境声或无法辨认的占位标签组成，暂不生成正式反馈；请先确认录音输入链路。"; fi)
+$(if [ "$TRANSCRIPT_QUALITY" = "usable" ]; then
+    echo "转写包含可用于课堂分析的有效内容，且双路采集完整。"
+  elif printf '%s' "$TRANSCRIPT_QUALITY" | grep -q '^audio_capture_degraded_'; then
+    echo "文字稿可用于人工恢复，但录音只捕获到一路音频（$AUDIO_CAPTURE_STATUS）；暂不生成正式反馈或更新学生档案。"
+  else
+    echo "自动转写或录音完整性不足，暂不生成正式反馈；请先确认录音输入链路。"
+  fi)
 
 ## 1. 本节课内容
 > 待装有该 Skill 的 AI 根据完整课堂文字稿补全

@@ -27,6 +27,15 @@ class TranscriptionPreflightTests(unittest.TestCase):
         ])
         self.assertEqual(report["status"], "usable")
 
+    def test_empty_samples_are_inconclusive_not_no_voice(self):
+        report = MODULE.assess_segments([])
+        self.assertEqual(report["status"], "inconclusive")
+        self.assertEqual(report["reason"], "insufficient_sample_speech")
+
+    def test_sparse_samples_are_inconclusive_not_rejected(self):
+        report = MODULE.assess_segments(["Yes, I understand."])
+        self.assertEqual(report["status"], "inconclusive")
+
     def test_short_recordings_do_not_run_sampling_gate(self):
         self.assertEqual(MODULE.sample_offsets(599), [])
 

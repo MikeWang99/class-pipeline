@@ -9,10 +9,14 @@ The transcription path is intentionally local-only. Audio is converted to
 processed by whisper.cpp. No API key, network request, or remote fallback is
 used.
 
+Reliability rule: an empty first-pass transcript is not treated as proof that
+there was no voice.  Stereo native captures are retried channel-by-channel
+with a relaxed no-speech threshold before the session is declared empty.
+
 Outputs written to OUTDIR:
     transcript.txt           one line per segment with timestamps
     transcript.json          machine-readable segments
-    transcription_meta.json  backend, model, language, and duration metadata
+    transcription_meta.json  backend, model, language, duration, retry metadata
 """
 from __future__ import annotations
 
@@ -29,6 +33,8 @@ WHISPER_MODEL = os.path.expanduser(os.environ.get(
     "WHISPER_MODEL", "~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin"))
 CHUNK_SECONDS = 600
 SINGLE_FILE_LIMIT = 570
+DEFAULT_NO_SPEECH_THRESHOLD = os.environ.get("WHISPER_NO_SPEECH_THRESHOLD", "0.60")
+RETRY_NO_SPEECH_THRESHOLD = os.environ.get("WHISPER_RETRY_NO_SPEECH_THRESHOLD", "1.00")
 
 
 def fmt_ts(sec: float) -> str:
@@ -55,7 +61,13 @@ def parse_whisper_timestamp(value: str) -> float:
     return int(hours) * 3600 + int(minutes) * 60 + float(rest)
 
 
-def transcribe_local_file(path: str, language: str | None, outbase: str) -> dict:
+def transcribe_local_file(
+    path: str,
+    language: str | None,
+    outbase: str,
+    *,
+    no_speech_threshold: str | None = None,
+) -> dict:
     if not shutil.which(WHISPER_CLI):
         raise RuntimeError(f"local whisper-cli not found: {WHISPER_CLI}")
     if not os.path.isfile(WHISPER_MODEL):
@@ -65,11 +77,12 @@ def transcribe_local_file(path: str, language: str | None, outbase: str) -> dict
         )
 
     json_path = f"{outbase}.json"
+    threshold = no_speech_threshold or DEFAULT_NO_SPEECH_THRESHOLD
     cmd = [
         WHISPER_CLI, "-m", WHISPER_MODEL, "-f", path,
         "-oj", "-of", outbase,
         "-t", os.environ.get("WHISPER_THREADS", "8"),
-        "-nth", os.environ.get("WHISPER_NO_SPEECH_THRESHOLD", "0.60"),
+        "-nth", str(threshold),
         "-np",
     ]
     # Omitting -l lets whisper.cpp auto-detect multilingual speech. An
@@ -88,14 +101,18 @@ def transcribe_local_file(path: str, language: str | None, outbase: str) -> dict
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"local whisper output missing or invalid: {json_path}") from exc
     finally:
-        # The session only needs the normalized transcript and metadata.
         try:
             os.unlink(json_path)
         except FileNotFoundError:
             pass
 
 
-def extract_local_segments(result: dict, offset: float) -> list[dict]:
+def extract_local_segments(
+    result: dict,
+    offset: float,
+    *,
+    source_channel: str | None = None,
+) -> list[dict]:
     segments = []
     for item in result.get("transcription", []):
         timestamps = item.get("timestamps", {})
@@ -104,11 +121,14 @@ def extract_local_segments(result: dict, offset: float) -> list[dict]:
         end = timestamps.get("to")
         if not text or not start or not end:
             continue
-        segments.append({
+        segment = {
             "start": offset + parse_whisper_timestamp(start),
             "end": offset + parse_whisper_timestamp(end),
             "text": text,
-        })
+        }
+        if source_channel:
+            segment["source_channel"] = source_channel
+        segments.append(segment)
     return segments
 
 
@@ -121,34 +141,55 @@ def audio_channels(source: str) -> int:
     return int(out)
 
 
-def conversion_filter(channels: int) -> str:
-    # New pipeline recordings are stereo: left = native system audio,
-    # right = microphone. Blend the sources only for transcription,
-    # after retaining the raw channels for diagnostics.
-    source_mix = "pan=mono|c0=0.707*c0+0.707*c1" if channels >= 2 else "acopy"
+def conversion_filter(channels: int, channel: int | None = None) -> str:
+    if channel is not None:
+        source_mix = f"pan=mono|c0=c{channel}"
+    elif channels >= 2:
+        # Normal first pass.  Raw channels are retained separately so a failed
+        # mixed pass can be recovered channel-by-channel without losing source
+        # information or confusing "no speech" with "no capture".
+        source_mix = "pan=mono|c0=0.707*c0+0.707*c1"
+    else:
+        source_mix = "acopy"
     return f"{source_mix},highpass=f=70,dynaudnorm=f=150:g=15:p=0.95"
 
 
-def convert_to_mono_pcm(source: str, destination: str, channels: int) -> None:
+def convert_to_mono_pcm(
+    source: str,
+    destination: str,
+    channels: int,
+    *,
+    channel: int | None = None,
+) -> None:
     subprocess.run([
         "ffmpeg", "-nostdin", "-y", "-v", "error", "-i", source,
-        "-af", conversion_filter(channels), "-ac", "1", "-ar", "16000",
+        "-af", conversion_filter(channels, channel), "-ac", "1", "-ar", "16000",
         "-c:a", "pcm_s16le", destination,
     ], check=True)
 
 
-def transcribe_chunks(audio: str, outdir: str, duration: float, channels: int,
-                      language: str | None) -> list[dict]:
+def transcribe_chunks(
+    audio: str,
+    outdir: str,
+    duration: float,
+    channels: int,
+    language: str | None,
+    *,
+    channel: int | None = None,
+    source_channel: str | None = None,
+    no_speech_threshold: str | None = None,
+) -> list[dict]:
+    del outdir  # kept in the signature for compatibility with older callers
     segments: list[dict] = []
     with tempfile.TemporaryDirectory(prefix="physics-transcribe-") as tmp:
         if duration <= SINGLE_FILE_LIMIT:
             chunk_paths = [os.path.join(tmp, "chunk_000.wav")]
-            convert_to_mono_pcm(audio, chunk_paths[0], channels)
+            convert_to_mono_pcm(audio, chunk_paths[0], channels, channel=channel)
         else:
             pattern = os.path.join(tmp, "chunk_%03d.wav")
             subprocess.run([
                 "ffmpeg", "-nostdin", "-y", "-v", "error", "-i", audio,
-                "-af", conversion_filter(channels), "-ac", "1", "-ar", "16000",
+                "-af", conversion_filter(channels, channel), "-ac", "1", "-ar", "16000",
                 "-c:a", "pcm_s16le",
                 "-f", "segment", "-segment_time", str(CHUNK_SECONDS),
                 "-reset_timestamps", "1", pattern,
@@ -159,12 +200,80 @@ def transcribe_chunks(audio: str, outdir: str, duration: float, channels: int,
             offset = index * CHUNK_SECONDS
             print(
                 f"Transcribing chunk {index + 1}/{len(chunk_paths)} "
-                f"(from {fmt_ts(offset)})...", file=sys.stderr,
+                f"(from {fmt_ts(offset)})...",
+                file=sys.stderr,
             )
             base = os.path.join(tmp, f"local_{index:03d}")
-            result = transcribe_local_file(chunk, language, base)
-            segments.extend(extract_local_segments(result, offset))
+            result = transcribe_local_file(
+                chunk,
+                language,
+                base,
+                no_speech_threshold=no_speech_threshold,
+            )
+            segments.extend(
+                extract_local_segments(
+                    result,
+                    offset,
+                    source_channel=source_channel,
+                )
+            )
     return segments
+
+
+def retry_plan(channels: int) -> list[tuple[int | None, str | None, str]]:
+    """Return recovery passes used only after a zero-segment first pass."""
+    if channels >= 2:
+        return [
+            (0, "system_audio", "system_channel_relaxed"),
+            (1, "microphone", "microphone_channel_relaxed"),
+        ]
+    return [(None, None, "mono_relaxed")]
+
+
+def recover_empty_transcript(
+    audio: str,
+    outdir: str,
+    duration: float,
+    channels: int,
+    language: str | None,
+) -> tuple[list[dict], list[str]]:
+    recovered: list[dict] = []
+    attempts: list[str] = []
+    for channel, source_channel, label in retry_plan(channels):
+        attempts.append(label)
+        recovered.extend(
+            transcribe_chunks(
+                audio,
+                outdir,
+                duration,
+                channels,
+                language,
+                channel=channel,
+                source_channel=source_channel,
+                no_speech_threshold=RETRY_NO_SPEECH_THRESHOLD,
+            )
+        )
+    recovered.sort(key=lambda item: (float(item["start"]), float(item["end"])))
+    return recovered, attempts
+
+
+def write_outputs(
+    outdir: str,
+    segments: list[dict],
+    metadata: dict[str, object],
+) -> None:
+    with open(os.path.join(outdir, "transcript.txt"), "w", encoding="utf-8") as f:
+        for segment in segments:
+            source = segment.get("source_channel")
+            source_label = f"[{source}] " if source else ""
+            f.write(
+                f"[{fmt_ts(segment['start'])} - {fmt_ts(segment['end'])}] "
+                f"{source_label}{segment['text']}\n"
+            )
+    with open(os.path.join(outdir, "transcript.json"), "w", encoding="utf-8") as f:
+        json.dump(segments, f, ensure_ascii=False, indent=2)
+    with open(os.path.join(outdir, "transcription_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
 
 
 def main() -> None:
@@ -181,28 +290,53 @@ def main() -> None:
     os.makedirs(outdir, exist_ok=True)
     duration = probe_duration(audio)
     channels = audio_channels(audio)
-    print(f"Backend: local whisper.cpp", file=sys.stderr)
+    print("Backend: local whisper.cpp", file=sys.stderr)
     print(f"Model: {WHISPER_MODEL}", file=sys.stderr)
     print(f"Audio duration: {fmt_ts(duration)}", file=sys.stderr)
 
-    segments = transcribe_chunks(audio, outdir, duration, channels, language)
-    with open(os.path.join(outdir, "transcript.txt"), "w", encoding="utf-8") as f:
-        for segment in segments:
-            f.write(
-                f"[{fmt_ts(segment['start'])} - {fmt_ts(segment['end'])}] "
-                f"{segment['text']}\n"
-            )
-    with open(os.path.join(outdir, "transcript.json"), "w", encoding="utf-8") as f:
-        json.dump(segments, f, ensure_ascii=False, indent=2)
-    with open(os.path.join(outdir, "transcription_meta.json"), "w", encoding="utf-8") as f:
-        json.dump({
-            "backend": "local-whisper.cpp",
-            "model": WHISPER_MODEL,
-            "language": language,
-            "duration_seconds": duration,
-            "source_channels": channels,
-            "segment_count": len(segments),
-        }, f, ensure_ascii=False, indent=2)
+    attempts = ["mixed_default"]
+    segments = transcribe_chunks(
+        audio,
+        outdir,
+        duration,
+        channels,
+        language,
+        no_speech_threshold=DEFAULT_NO_SPEECH_THRESHOLD,
+    )
+    fallback_used = False
+    if not segments:
+        fallback_used = True
+        print(
+            "Primary Whisper pass returned zero segments; retrying recoverable "
+            "source channel(s) with a relaxed no-speech threshold.",
+            file=sys.stderr,
+        )
+        segments, recovery_attempts = recover_empty_transcript(
+            audio, outdir, duration, channels, language
+        )
+        attempts.extend(recovery_attempts)
+
+    metadata: dict[str, object] = {
+        "backend": "local-whisper.cpp",
+        "model": WHISPER_MODEL,
+        "language": language,
+        "duration_seconds": duration,
+        "source_channels": channels,
+        "segment_count": len(segments),
+        "no_speech_threshold_primary": DEFAULT_NO_SPEECH_THRESHOLD,
+        "no_speech_threshold_retry": RETRY_NO_SPEECH_THRESHOLD,
+        "fallback_used": fallback_used,
+        "attempts": attempts,
+        "status": "ok" if segments else "no_speech_after_retries",
+    }
+    write_outputs(cutdir, segments, metadata)
+
+    if not segments:
+        raise RuntimeError(
+            "Whisper produced no speech segments after mixed and recovery passes; "
+            "audio was preserved for diagnosis."
+        )
+
     print(f"Done: {len(segments)} segments -> {outdir}/transcript.txt")
 
 
