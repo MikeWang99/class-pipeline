@@ -129,15 +129,30 @@ ok "不依赖 BlackHole、Multi-Output 或固定的扬声器名称"
 
 # ---------- 3. vault detection ----------
 step "3/7 探测 Obsidian Vault"
-VAULT=""
-CANDIDATES=()
-while IFS= read -r d; do CANDIDATES+=("$d"); done < <(
+# iCloud can contain an empty, similarly named directory next to the real
+# vault. Prefer the candidate that already contains the teaching tree and
+# notes, otherwise a reinstall can silently redirect the pipeline.
+VAULT="$(
   find "$HOME/Documents" "$HOME/Desktop" "$HOME/Library/Mobile Documents" \
-       -maxdepth 5 -name ".obsidian" -type d 2>/dev/null | head -3)
-if [ "${#CANDIDATES[@]}" -eq 0 ]; then
+       -maxdepth 5 -name ".obsidian" -type d 2>/dev/null |
+  python3 -c '
+import sys
+from pathlib import Path
+
+def score(path):
+    teaching = path / "上课记录"
+    folders = ("备课内容", "课堂文字稿", "课后反馈", "课后反馈草稿", "学生档案")
+    note_count = sum(1 for root in (path, teaching) if root.is_dir() for _ in root.glob("*.md"))
+    return int(teaching.is_dir()) * 1000 + sum(int((teaching / folder).is_dir()) * 100 for folder in folders) + min(note_count, 1000)
+
+candidates = [Path(line.strip()).parent for line in sys.stdin if line.strip()]
+if candidates:
+    print(max(candidates, key=score))
+'
+)"
+if [ -z "$VAULT" ]; then
   fail "未找到 Obsidian Vault（含 .obsidian 目录）。请手动创建后编辑 config.json 的 vault_path。"
 else
-  VAULT="$(dirname "${CANDIDATES[0]}")"
   ok "Vault: $VAULT"
 fi
 

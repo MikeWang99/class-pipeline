@@ -16,23 +16,59 @@ else
   TARGET_DATE="$ARG"
 fi
 
+MAX_ATTEMPTS="${CALENDAR_QUERY_ATTEMPTS:-2}"
+TIMEOUT_SECONDS="${CALENDAR_QUERY_TIMEOUT_SECONDS:-15}"
+
+# EventKit can wait indefinitely when macOS is waiting for a permission
+# decision. Bound each helper process so a failed calendar read cannot stall
+# the watcher or every later post-class retry.
+run_bounded() {
+  /usr/bin/python3 - "$TIMEOUT_SECONDS" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+timeout = float(sys.argv[1])
+command = sys.argv[2:]
+proc = subprocess.Popen(
+    command,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    start_new_session=True,
+)
+try:
+    stdout, stderr = proc.communicate(timeout=timeout)
+except subprocess.TimeoutExpired:
+    os.killpg(proc.pid, signal.SIGTERM)
+    stdout, stderr = proc.communicate()
+    print(f"calendar helper timed out after {timeout:g}s", file=sys.stderr)
+    sys.exit(124)
+sys.stdout.write(stdout)
+sys.stderr.write(stderr)
+sys.exit(proc.returncode)
+PY
+}
+
 attempt=1
-while [ "$attempt" -le 3 ]; do
-  if output="$("$SWIFT_QUERY" "$ARG" 2>&1)"; then
+output=""
+while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
+  if output="$(run_bounded "$SWIFT_QUERY" "$ARG" 2>&1)"; then
     if [ -n "$output" ]; then
       printf '%s\n' "$output"
       exit 0
     fi
   fi
 
-  if [ "$attempt" -lt 3 ]; then
+  if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
     sleep 2
   fi
   attempt=$((attempt + 1))
 done
 
 if [ -f "$APPLESCRIPT_QUERY" ]; then
-  if output="$(/usr/bin/osascript "$APPLESCRIPT_QUERY" "$TARGET_DATE" 2>/dev/null)" && [ -n "$output" ]; then
+  if output="$(run_bounded /usr/bin/osascript "$APPLESCRIPT_QUERY" "$TARGET_DATE" 2>/dev/null)" && [ -n "$output" ]; then
     printf '%s\n' "$output"
     exit 0
   fi
