@@ -36,7 +36,11 @@ class TriggerPostclassAITests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="physicsclass-ai-trigger-") as tmp:
             session = Path(tmp) / "2026-08-28_120000"
             session.mkdir()
-            (session / "ai_completed.txt").write_text("complete\n", encoding="utf-8")
+            review = Path(tmp) / "teacher-review.md"
+            review.write_text("review\n", encoding="utf-8")
+            (session / "ai_completed.txt").write_text(
+                f"teacher_review: {review}\n", encoding="utf-8"
+            )
             material = Path(tmp) / "materials.md"
             material.write_text("status: 已完成\n", encoding="utf-8")
             env = os.environ.copy()
@@ -57,7 +61,11 @@ class TriggerPostclassAITests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="physicsclass-ai-trigger-") as tmp:
             session = Path(tmp) / "2026-08-28_120000"
             session.mkdir()
-            (session / "ai_completed.txt").write_text("complete\n", encoding="utf-8")
+            review = Path(tmp) / "teacher-review.md"
+            review.write_text("review\n", encoding="utf-8")
+            (session / "ai_completed.txt").write_text(
+                f"teacher_review: {review}\n", encoding="utf-8"
+            )
             material = Path(tmp) / "materials.md"
             material.write_text("status: 已完成\n", encoding="utf-8")
             for name in ("audio.wav", "system_audio.caf", "microphone_audio.caf"):
@@ -88,7 +96,9 @@ class TriggerPostclassAITests(unittest.TestCase):
                 "#!/bin/bash\n"
                 f"printf '%s\\n' 'status: 已完成' > {material}\n"
                 f"printf '%s\\n' 'feedback' > {feedback}\n"
-                f"printf '%s\\n' 'formal_feedback: {feedback}' > {session / 'ai_completed.txt'}\n",
+                f"printf '%s\\n' 'teacher review' > {tmp}/teacher-review.md\n"
+                f"printf '%s\\n' 'formal_feedback: {feedback}' > {session / 'ai_completed.txt'}\n"
+                f"printf '%s\\n' 'teacher_review: {tmp}/teacher-review.md' >> {session / 'ai_completed.txt'}\n",
                 encoding="utf-8",
             )
             fake_codex.chmod(0o755)

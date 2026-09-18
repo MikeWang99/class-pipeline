@@ -155,6 +155,7 @@ audio_capture_action: $AUDIO_CAPTURE_ACTION
 source_transcript: $TRANSCRIPT_ARCHIVE
 source_profile: ${PROFILE:-（未匹配到学生档案）}
 source_previous_feedback: ${PREV_FILE:-（无）}
+teacher_review_dir: $VAULT_PATH/上课记录/教学优化
 generated_by: material-pipeline-only
 ---
 
@@ -166,6 +167,8 @@ generated_by: material-pipeline-only
 - 正式反馈需遵循本 Skill 的固定格式与措辞要求，尤其要直接写学生名字，避免泛泛写“学生”
 - 如果 status 为“待AI识别学生”，先按 session 开始时间重新查询日历；日历暂时不可用时保留队列，不能跳过或猜学生
 - 如果 status 为“待人工确认录音”，不得生成正式家长反馈、不得更新学生问题台账、不得删除原始音频
+- 家长反馈、学生档案更新完成后，必须继续读取 docs/teacher-review-spec.md，生成给授课教师本人的教学优化复盘，写入“上课记录/教学优化/”；同时维护“教学优化总览.md”
+- 只有正式家长反馈、学生档案更新和教学优化复盘都完成后，才将 status 改为“已完成”并写入 ai_completed.txt
 
 ## 学生档案摘要
 ${PROFILE_TEXT:-（未匹配到学生档案）}
