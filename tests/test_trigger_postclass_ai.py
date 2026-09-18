@@ -76,6 +76,39 @@ class TriggerPostclassAITests(unittest.TestCase):
             self.assertFalse((session / "microphone_audio.caf").exists())
             self.assertTrue((session / "audio_deleted.txt").exists())
 
+    def test_worker_accepts_marker_feedback_path_without_material_metadata(self):
+        with tempfile.TemporaryDirectory(prefix="physicsclass-ai-trigger-") as tmp:
+            session = Path(tmp) / "2026-08-28_120000"
+            session.mkdir()
+            material = Path(tmp) / "materials.md"
+            material.write_text("status: 待AI生成\n", encoding="utf-8")
+            feedback = Path(tmp) / "feedback.md"
+            fake_codex = Path(tmp) / "fake-codex.sh"
+            fake_codex.write_text(
+                "#!/bin/bash\n"
+                f"printf '%s\\n' 'status: 已完成' > {material}\n"
+                f"printf '%s\\n' 'feedback' > {feedback}\n"
+                f"printf '%s\\n' 'formal_feedback: {feedback}' > {session / 'ai_completed.txt'}\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            for name in ("audio.wav", "system_audio.caf", "microphone_audio.caf"):
+                (session / name).write_bytes(b"source")
+
+            env = os.environ.copy()
+            env["CODEX_BIN"] = str(fake_codex)
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "--worker", str(session), str(material)],
+                check=True,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.stdout, "")
+            self.assertFalse((session / "audio.wav").exists())
+            self.assertTrue((session / "audio_deleted.txt").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

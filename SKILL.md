@@ -21,7 +21,7 @@ description: 物理教学课前/课中/课后全链路自动化。课前定时�
 - **日历事件格式**：`{体系} Class-{学生名}`，如 `CIE Class-Sujal`、`AP Class-Eden`。体系取 `Class` 前文本，学生取连字符后文本。
 - 读取配置后再干活；`config.json` 不存在时提示用户先运行 `setup.sh`。
 - 所有脚本在 `scripts/` 下，用绝对路径调用。
-- **转写后端**：`scripts/transcribe_audio.py` 固定使用本地 whisper.cpp，默认模型为 `~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin`（多语言 Q5 量化版）；也可用 `WHISPER_MODEL` 指定其他本地模型，`TRANSCRIBE_LANGUAGE=zh`、`en` 或 `auto` 指定语言。不会读取 API key，也不会联网转写。
+- **转写后端**：`scripts/transcribe_audio.py` 固定使用本地 whisper.cpp，默认模型为 `~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin`（多语言 Q5 量化版）；也可用 `WHISPER_MODEL` 指定其他本地模型，`TRANSCRIBE_LANGUAGE=zh`、`en` 或 `auto` 指定语言。不会读取 API key，也不会联网转写。对短时间内完全重复的 Whisper 循环片段会保留第一次、清理后续重复，并把未过滤原稿保存为 session 内的 `transcript_raw.json` 供诊断。
 - **系统声音采集**：课中使用 macOS 原生 ScreenCaptureKit，同时采集当前系统播放声音和当前麦克风输入，分别保存为 `system_audio.caf` 与 `microphone_audio.caf`，散会后合成为 `audio.wav`（左声道为系统声，右声道为麦克风）。不依赖 BlackHole、Multi-Output、HDMI 或固定的扬声器/麦克风名称。首次运行需要给 `PhysicsClassAudio` 一次“麦克风”和“屏幕与系统音频录制”权限。
 
 ## 1. 首次安装（闭环）
@@ -74,7 +74,7 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 - 有日历日程：「转写完成，文字稿已归档，反馈素材已准备好（正式反馈/档案更新待 AI 完成）✅」
 - 未匹配到课程：「转写完成，文字稿已归档；课程待重新识别，反馈任务已保留」
 
-**AI 生成部分**：用户说「生成反馈」「精修反馈」「更新档案」时，AI 读取 `课后反馈草稿/` 里的素材稿、课堂文字稿与学生档案，按本 skill 内置规范 `docs/feedback-spec.md` 生成正式反馈，并写入 `{vault}/上课记录/课后反馈/{YYYY-MM-DD}-{学生}-feedback.md`，同时按规范的台账更新规则同步 `{vault}/上课记录/学生档案/{学生}.md`。也就是说，学生档案更新发生在这一步，而不是 watcher 仅靠转写就能自动完成。
+**AI 生成部分**：用户说「生成反馈」「精修反馈」「更新档案」时，AI 读取 `课后反馈草稿/` 里的素材稿、课堂文字稿与学生档案，按本 skill 内置规范 `docs/feedback-spec.md` 生成正式反馈，并写入 `{vault}/上课记录/课后反馈/{YYYY-MM-DD}-{学生}-feedback.md`，同时按规范的台账更新规则同步 `{vault}/上课记录/学生档案/{学生}.md`。也就是说，学生档案更新发生在这一步，而不是 watcher 仅靠转写就能自动完成。完成标记应写入 session 的 `ai_completed.txt`；素材 front matter 中的 `formal_feedback` 只是可选元数据，不是完成条件。
 
 每天 10:00 的 Codex 定时任务保留为失败补偿与次日备课入口：扫描 `课后反馈草稿/` 中仍处于“待AI生成 / 待AI识别学生”的文件，先重试日历匹配，再由当前宿主 AI 读取完整文字稿生成正式反馈并更新档案。日历暂时不可用时保留任务，不得猜学生或标记完成。本地 Whisper 只负责转写，不参与正文生成。
 

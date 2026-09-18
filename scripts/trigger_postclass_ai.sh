@@ -77,6 +77,14 @@ worker() {
     local feedback_file material_status
     material_status=$(sed -n 's/^status: //p' "$material_file" | head -1)
     feedback_file=$(sed -n 's/^formal_feedback: //p' "$material_file" | head -1)
+    # `formal_feedback` is optional material metadata. The completion marker
+    # is authoritative because the AI writes it after saving the feedback.
+    if [ -z "$feedback_file" ]; then
+      feedback_file=$(sed -n 's/^formal_feedback: //p' "$session_dir/ai_completed.txt" | head -1)
+    fi
+    if [ -z "$feedback_file" ]; then
+      feedback_file=$(sed -n 's/^feedback: //p' "$session_dir/ai_completed.txt" | head -1)
+    fi
     if [ "$material_status" != "已完成" ] || [ -z "$feedback_file" ] || [ ! -s "$feedback_file" ]; then
       log "AI marker rejected; feedback/profile completion evidence is incomplete (session=$session_dir material=$material_file)"
       return 1

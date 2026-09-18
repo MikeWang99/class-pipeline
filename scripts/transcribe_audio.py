@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
+from collections import defaultdict, deque
 from pathlib import Path
 
 WHISPER_CLI = os.environ.get("WHISPER_CLI", "/opt/homebrew/bin/whisper-cli")
@@ -35,6 +38,7 @@ CHUNK_SECONDS = 600
 SINGLE_FILE_LIMIT = 570
 DEFAULT_NO_SPEECH_THRESHOLD = os.environ.get("WHISPER_NO_SPEECH_THRESHOLD", "0.60")
 RETRY_NO_SPEECH_THRESHOLD = os.environ.get("WHISPER_RETRY_NO_SPEECH_THRESHOLD", "1.00")
+REPETITION_WINDOW_SECONDS = float(os.environ.get("WHISPER_REPETITION_WINDOW_SECONDS", "45"))
 
 
 def fmt_ts(sec: float) -> str:
@@ -257,6 +261,46 @@ def recover_empty_transcript(
     return recovered, attempts
 
 
+def transcript_key(text: str) -> str:
+    """Normalize text for detecting short-window Whisper decoding loops."""
+    return re.sub(r"\W+", "", unicodedata.normalize("NFKC", text).lower())
+
+
+def collapse_repeated_segments(
+    segments: list[dict],
+    *,
+    window_seconds: float = REPETITION_WINDOW_SECONDS,
+) -> tuple[list[dict], int]:
+    """Drop exact repeated loops while preserving the first occurrence.
+
+    Long recordings can make Whisper repeat one phrase every second during a
+    quiet or noisy interval. A phrase repeated after a long interval may be a
+    legitimate teaching example, so only collapse duplicates inside a short
+    time window. The original unfiltered output is preserved separately by
+    ``main`` whenever anything is removed.
+    """
+    recent: dict[str, deque[float]] = defaultdict(deque)
+    cleaned: list[dict] = []
+    dropped = 0
+    for segment in segments:
+        text = str(segment.get("text", "")).strip()
+        source_channel = str(segment.get("source_channel", ""))
+        key = f"{source_channel}:{transcript_key(text)}" if source_channel else transcript_key(text)
+        if not key or len(key) < 4:
+            cleaned.append(segment)
+            continue
+        start = float(segment.get("start", 0.0))
+        timestamps = recent[key]
+        while timestamps and start - timestamps[0] > window_seconds:
+            timestamps.popleft()
+        if timestamps:
+            dropped += 1
+            continue
+        cleaned.append(segment)
+        timestamps.append(start)
+    return cleaned, dropped
+
+
 def write_outputs(
     outdir: str,
     segments: list[dict],
@@ -316,6 +360,23 @@ def main() -> None:
         )
         attempts.extend(recovery_attempts)
 
+    raw_segments = list(segments)
+    raw_segment_count = len(raw_segments)
+    segments, repetition_filter_dropped = collapse_repeated_segments(segments)
+    if repetition_filter_dropped:
+        raw_json_path = os.path.join(outdir, "transcript_raw.json")
+        with open(raw_json_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "segments": raw_segments,
+                    "raw_segment_count": raw_segment_count,
+                    "note": "Unfiltered Whisper output retained for diagnosis; transcript.json/txt contain the cleaned output.",
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+
     metadata: dict[str, object] = {
         "backend": "local-whisper.cpp",
         "model": WHISPER_MODEL,
@@ -323,6 +384,9 @@ def main() -> None:
         "duration_seconds": duration,
         "source_channels": channels,
         "segment_count": len(segments),
+        "raw_segment_count": raw_segment_count,
+        "repetition_filter_dropped": repetition_filter_dropped,
+        "transcript_cleaned": bool(repetition_filter_dropped),
         "no_speech_threshold_primary": DEFAULT_NO_SPEECH_THRESHOLD,
         "no_speech_threshold_retry": RETRY_NO_SPEECH_THRESHOLD,
         "fallback_used": fallback_used,

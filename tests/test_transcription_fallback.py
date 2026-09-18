@@ -17,6 +17,18 @@ SPEC.loader.exec_module(MODULE)
 
 
 class TranscriptionFallbackTests(unittest.TestCase):
+    def test_collapse_repeated_segments_only_within_short_window(self):
+        segments = [
+            {"start": 0, "end": 1, "text": "We use the graph."},
+            {"start": 3, "end": 4, "text": "We use the graph."},
+            {"start": 120, "end": 121, "text": "We use the graph."},
+        ]
+        cleaned, dropped = MODULE.collapse_repeated_segments(
+            segments, window_seconds=45
+        )
+        self.assertEqual(dropped, 1)
+        self.assertEqual([item["start"] for item in cleaned], [0, 120])
+
     def test_stereo_zero_segment_retry_checks_each_source(self):
         plan = MODULE.retry_plan(2)
         self.assertEqual(
