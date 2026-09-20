@@ -75,10 +75,10 @@ if [ -f "$APPLESCRIPT_QUERY" ]; then
     printf '%s\n' "$output" | /usr/bin/python3 -c '
 import sys
 for raw in sys.stdin:
-    parts = raw.rstrip("\\n").split("\\t")
+    parts = raw.rstrip("\n").split("\t")
     if len(parts) >= 4:
-        _calendar, title, start, notes = parts[0], parts[1], parts[2], "\\t".join(parts[3:])
-        print(f"{title}\\t{start}\\t\\t\\t{notes}")
+        _calendar, title, start, notes = parts[0], parts[1], parts[2], "\t".join(parts[3:])
+        print(f"{title}\t{start}\t\t\t{notes}")
 '
     exit 0
   fi
