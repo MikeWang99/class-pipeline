@@ -16,6 +16,7 @@ SELECTOR="$SCRIPT_DIR/select_calendar_event.py"
 SKILL_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG="$SKILL_DIR/config.json"
 MAX_DELTA_SECONDS="${CALENDAR_MATCH_MAX_SECONDS:-3600}"
+MATCH_MIN_MARGIN_SECONDS="${CALENDAR_MATCH_MIN_MARGIN_SECONDS:-600}"
 
 SESSION_ARG="${1:-}"
 REF_Y=""
@@ -58,7 +59,7 @@ pick_best_event() {
 }
 
 pick_from_prep_notes() {
-  python3 - "$VAULT_PATH" "$REF_DATE" "$REF_ISO" "$MAX_DELTA_SECONDS" <<'PY'
+  python3 - "$VAULT_PATH" "$REF_DATE" "$REF_ISO" "$MAX_DELTA_SECONDS" "$MATCH_MIN_MARGIN_SECONDS" <<'PY'
 import re
 import sys
 from datetime import datetime
@@ -70,8 +71,9 @@ ref = datetime.fromisoformat(sys.argv[3]).replace(
     tzinfo=datetime.now().astimezone().tzinfo
 )
 max_delta = int(sys.argv[4])
+min_margin = int(sys.argv[5])
 prep_dir = vault / "上课记录" / "备课内容"
-best = None
+candidates = {}
 
 for path in sorted(prep_dir.glob(f"{ref_date} *.md")):
     text = path.read_text(encoding="utf-8", errors="replace")
@@ -103,13 +105,20 @@ for path in sorted(prep_dir.glob(f"{ref_date} *.md")):
     if delta > max_delta:
         continue
     system = system or "未命名体系"
-    if best is None or delta < best[0]:
-        best = (delta, system, student)
+    key = (system, student)
+    if key not in candidates or delta < candidates[key][0]:
+        candidates[key] = (delta, system, student)
 
-if best is None:
+ordered = sorted(candidates.values(), key=lambda item: item[0])
+if not ordered:
     sys.exit(1)
 
-print(f"{best[1]}|{best[2]}")
+if len(ordered) > 1 and ordered[1][0] - ordered[0][0] < min_margin:
+    # Multiple nearby lessons are an identity ambiguity, not a reason to
+    # guess. Keep the transcript queued for a later calendar retry.
+    sys.exit(2)
+
+print(f"{ordered[0][1]}|{ordered[0][2]}")
 PY
 }
 

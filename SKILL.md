@@ -58,7 +58,7 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 - **覆盖平台**：Zoom（zoom.us）、腾讯会议（wemeetapp/xmeet）、钉钉、飞书、Google Meet（Chrome/Safari 打开 meet.google.com 标签页）
 - **检测到开课**：启动 `PhysicsClassAudio`，分别捕获系统播放声和麦克风声；散会后合并成 `{recordings_dir}/sessions/{YYYY-MM-DD_HHMM}/audio.wav`。录音过程不检查 BlackHole、Multi-Output 或设备名称，任一原生采集通道未就绪时会保留诊断状态并阻止不可靠转写。
 - **检测到散会**（连续 45 秒无会议进程）：停止录音 → 写入 `audio_health.json` 检查文件是否为空，并对长录音写入 `transcription_preflight.json`，用本地 Turbo 抽样排除重复幻听。检查失败时保留音频、写明故障并跳过完整转写和反馈；健康时才使用本地 Whisper Turbo 转写 → 文字稿存 `transcript.txt` → **无论是否匹配到日历，都会先把文字稿归档到 Vault 的 `课堂文字稿/`** → 创建课后反馈待处理素材并交给当前 AI；只有正式家长反馈、学生档案更新和教师教学优化复盘都成功后才删除 `audio.wav` 及两份原始 `.caf` 通道（写入 `audio_deleted.txt` 删除记录），待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核
-- **课程身份锁定**：开课时立即按 session 时间匹配日历；若 EventKit 或 iCloud 当时短暂不可用，录音期间每 60 秒重试，直到将 `{SYSTEM}|{STUDENT}` 写入 `calendar_match.txt`
+- **课程身份锁定**：开课时立即按 session 时间匹配日历；若 EventKit 或 iCloud 当时短暂不可用，录音期间每 60 秒重试，直到将唯一的 `{SYSTEM}|{STUDENT}` 写入 `calendar_match.txt`。如果多个候选课在允许时间窗内接近，视为身份歧义，保留待处理队列，禁止按“最近的一节”猜学生。
 
 用户无需任何手动操作。若用户说「开始上课/手动录音」，可直接运行 `bash {skill_dir}/scripts/meeting_watcher.sh once` 强制走一轮录音+转写。
 
@@ -107,4 +107,4 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 | 文字稿只有环境声或占位标签 | 反馈素材会标记为“待人工确认录音”，不会调用 AI 生成反馈，也不会删除原始音频；先检查 `system_audio_status.txt` 和系统音频录制权限 |
 | 录音只有教师声音或出现重复幻听 | 检查 `audio_route.txt`、`audio_health.json` 和两份 `.caf` 原始通道；确认 `PhysicsClassAudio` 的系统音频录制权限已打开。Pipeline 会保留音频并跳过不可靠转写。 |
 | 定时任务没跑 | `launchctl list \| grep physicsclass` 确认任务在；plist 在 `~/Library/LaunchAgents/` |
-| 明明 UI 里有 Google 日历事件，但脚本没扫到 | 先确认系统“日历”权限已给 PhysicsClassScanner；查询脚本会重试 EventKit，并使用后台 AppleScript 读取 Calendar 数据，课后再优先回退到备课笔记里的 `event_start` 元数据做匹配；不会为了刷新权限主动打开 Calendar 窗口 |
+| 明明 UI 里有 Google 日历事件，但脚本没扫到 | 先确认系统“日历”权限已给 PhysicsClassScanner；查询脚本会重试 EventKit，并使用后台 AppleScript 读取 Calendar 数据，课后再优先回退到备课笔记里的 `event_start` 元数据做匹配。多个候选时间接近时会保留“待识别学生”，不会为了刷新权限主动打开 Calendar 窗口，也不会猜学生 |

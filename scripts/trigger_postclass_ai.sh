@@ -28,6 +28,41 @@ has_teacher_review() {
   [ -n "$review_file" ] && [ -s "$review_file" ]
 }
 
+prepare_material_identity() {
+  local session_dir="$1" material_file="$2" status calendar_status match system student rebuilt
+  PREPARED_MATERIAL="$material_file"
+  status=$(sed -n 's/^status: //p' "$material_file" | head -1)
+  calendar_status=$(sed -n 's/^calendar_match_status: //p' "$material_file" | head -1)
+
+  if [ "$status" = "待人工确认录音" ]; then
+    log "AI trigger withheld; transcript/audio quality requires human confirmation (session=$session_dir)"
+    return 3
+  fi
+  if [ "$status" != "待AI识别学生" ] && [ "$calendar_status" != "unmatched" ]; then
+    return 0
+  fi
+
+  match=$("$SCRIPT_DIR/match_calendar_event.sh" "$session_dir" 2>/dev/null) || match=""
+  case "$match" in
+    *'|'*)
+      system="${match%%|*}"
+      student="${match##*|}"
+      printf '%s\n' "$match" > "$session_dir/calendar_match.txt"
+      rebuilt=$(bash "$SCRIPT_DIR/postclass_generate.sh" "$session_dir" "$VAULT_PATH" "$system" "$student" 2>> "$LOG") || {
+        log "AI trigger withheld; matched material rebuild failed (session=$session_dir)"
+        return 1
+      }
+      PREPARED_MATERIAL="$rebuilt"
+      log "AI trigger identity resolved before Codex launch: $match (session=$session_dir)"
+      return 0
+      ;;
+    *)
+      log "AI trigger withheld; calendar identity is unresolved or ambiguous (session=$session_dir)"
+      return 2
+      ;;
+  esac
+}
+
 cleanup_recording() {
   local session_dir="$1" file bytes failed=0 deleted_file marker_tmp
   local files=("$session_dir/audio.wav" "$session_dir/system_audio.caf" "$session_dir/microphone_audio.caf")
@@ -62,6 +97,13 @@ worker() {
   # EXIT traps run after this function returns, so a function-local variable is
   # unset under `set -u`. Capture the path when installing the trap.
   trap "unlink '$lock_file' 2>/dev/null || true" EXIT
+
+  prepare_material_identity "$session_dir" "$material_file"
+  case "$?" in
+    0) material_file="$PREPARED_MATERIAL" ;;
+    2|3) return 0 ;;
+    *) return 1 ;;
+  esac
 
   if has_teacher_review "$session_dir"; then
     cleanup_recording "$session_dir" || true
@@ -146,6 +188,13 @@ has_teacher_review "$SESSION_DIR" && {
 if [ -s "$SESSION_DIR/ai_completed.txt" ]; then
   log "AI trigger resuming; completion marker exists but teacher review is missing: $SESSION_DIR"
 fi
+
+prepare_material_identity "$SESSION_DIR" "$MATERIAL_FILE"
+case "$?" in
+  0) MATERIAL_FILE="$PREPARED_MATERIAL" ;;
+  2|3) exit 0 ;;
+  *) exit 1 ;;
+esac
 
 if [ -f "$LOCK_FILE" ]; then
   existing_pid="$(cat "$LOCK_FILE" 2>/dev/null || true)"

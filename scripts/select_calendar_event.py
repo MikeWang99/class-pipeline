@@ -19,7 +19,7 @@ def select_event(lines: list[str], keyword: str, reference: datetime, max_delta:
     pattern = re.compile(
         rf"^(.*?)\s*{re.escape(keyword)}\s*[-－—]\s*(.+)$", re.IGNORECASE
     )
-    best = None
+    candidates = []
 
     for raw in lines:
         parts = raw.rstrip("\n").split("\t")
@@ -51,10 +51,19 @@ def select_event(lines: list[str], keyword: str, reference: datetime, max_delta:
             continue
         system = match.group(1).strip() or "未命名体系"
         student = match.group(2).strip()
-        if student and (best is None or delta < best[0]):
-            best = (delta, system, student)
+        if student:
+            candidates.append((delta, system, student))
 
-    return best
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0])
+    # When two calendar events are similarly close, a nearest-time guess can
+    # attach a transcript to the wrong student. Leave it unresolved so the
+    # next retry or a human correction can supply an unambiguous identity.
+    if len(candidates) > 1 and candidates[1][0] - candidates[0][0] < 600:
+        return None
+    return candidates[0]
 
 
 def main() -> int:

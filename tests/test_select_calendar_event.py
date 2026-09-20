@@ -48,6 +48,14 @@ class SelectCalendarEventTests(unittest.TestCase):
         ref = datetime.fromisoformat("2026-08-24T18:30:00+08:00")
         self.assertIsNone(MODULE.select_event(lines, "Class", ref, 3600))
 
+    def test_rejects_nearby_ambiguous_events(self):
+        lines = [
+            "CIE class-Eden\t2026-09-20T09:00:00+08:00\t\n",
+            "AP2 class-Johnny\t2026-09-20T10:30:00+08:00\t\n",
+        ]
+        ref = datetime.fromisoformat("2026-09-20T09:43:39+08:00")
+        self.assertIsNone(MODULE.select_event(lines, "Class", ref, 3600))
+
 
 if __name__ == "__main__":
     unittest.main()
