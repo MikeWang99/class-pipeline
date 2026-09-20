@@ -63,7 +63,7 @@ def latest_file_for_student(folder: Path, student: str) -> Path | None:
     return hits[-1] if hits else None
 
 
-def update_existing_note_metadata(path: Path, event_start: str, calendar_title: str) -> bool:
+def update_existing_note_metadata(path: Path, event_start: str, event_end: str, event_id: str, calendar_title: str) -> bool:
     text = path.read_text(encoding="utf-8", errors="replace")
     if not text.startswith("---\n"):
         return False
@@ -78,7 +78,12 @@ def update_existing_note_metadata(path: Path, event_start: str, calendar_title: 
         return False
 
     frontmatter_lines = lines[1:end_idx]
-    keys = {"event_start": event_start, "calendar_title": calendar_title}
+    keys = {
+        "event_start": event_start,
+        "event_end": event_end,
+        "calendar_event_id": event_id,
+        "calendar_title": calendar_title,
+    }
     changed = False
     seen = set()
 
@@ -107,7 +112,8 @@ def update_existing_note_metadata(path: Path, event_start: str, calendar_title: 
     return True
 
 
-def build_skeleton(when: str, system: str, student: str, event_start: str, calendar_title: str, notes: str,
+def build_skeleton(when: str, system: str, student: str, event_start: str, event_end: str,
+                   event_id: str, calendar_title: str, notes: str,
                    profile_md: str, last_feedback_md: str, last_prep_md: str) -> str:
     return f"""---
 date: {when}
@@ -115,6 +121,8 @@ system: {system}
 student: {student}
 status: 待AI补全
 event_start: {event_start}
+event_end: {event_end}
+calendar_event_id: {event_id}
 calendar_title: {calendar_title}
 ---
 
@@ -222,14 +230,23 @@ def main() -> None:
             if len(parts) < 2:
                 continue
             summary, start_str = parts[0].strip(), parts[1].strip()
-            notes = parts[2] if len(parts) > 2 else ""
+            # query_calendar_events.sh normalizes both Swift and AppleScript
+            # sources to title/start/end/event_id/notes.
+            if len(parts) >= 5:
+                end_str = parts[2].strip()
+                event_id = parts[3].strip()
+                notes = parts[4]
+            else:
+                end_str = ""
+                event_id = ""
+                notes = parts[2] if len(parts) > 2 else ""
             parsed = parse_event(summary, keyword)
             if not parsed:
                 continue
             system, student = parsed
             target = prep_dir / f"{target_date} {system} Class-{student}.md"
             if target.exists():
-                if update_existing_note_metadata(target, start_str, summary):
+                if update_existing_note_metadata(target, start_str, end_str, event_id, summary):
                     refreshed += 1
                     log(f"refreshed prep metadata: {target.name}")
                 log(f"skip existing prep note: {target.name}")
@@ -240,8 +257,10 @@ def main() -> None:
             last_feedback = read_head(latest_file_for_student(feedback_dir, student) or Path("/nonexistent"), 60)
             last_prep = read_head(latest_file_for_student(prep_dir, student) or Path("/nonexistent"), 40)
 
-            skeleton = build_skeleton(target_date, system, student, start_str, summary, notes,
-                                      profile, last_feedback, last_prep)
+            skeleton = build_skeleton(
+                target_date, system, student, start_str, end_str, event_id, summary, notes,
+                profile, last_feedback, last_prep
+            )
 
             target.write_text(skeleton, encoding="utf-8")
             created += 1

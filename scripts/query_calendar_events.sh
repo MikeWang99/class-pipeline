@@ -69,7 +69,17 @@ done
 
 if [ -f "$APPLESCRIPT_QUERY" ]; then
   if output="$(run_bounded /usr/bin/osascript "$APPLESCRIPT_QUERY" "$TARGET_DATE" 2>/dev/null)" && [ -n "$output" ]; then
-    printf '%s\n' "$output"
+    # Normalize AppleScript's legacy: calendar, title, start, notes
+    # into the Swift v2.2 shape: title, start, end, event_id, notes.
+    # This keeps preclass_scan.py and post-class matchers on one column contract.
+    printf '%s\n' "$output" | /usr/bin/python3 -c '
+import sys
+for raw in sys.stdin:
+    parts = raw.rstrip("\n").split("\t")
+    if len(parts) >= 4:
+        _calendar, title, start, notes = parts[0], parts[1], parts[2], "\t".join(parts[3:])
+        print(f"{title}\t{start}\t\t\t{notes}")
+'
     exit 0
   fi
 fi

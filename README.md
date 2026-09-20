@@ -6,15 +6,18 @@
 |---|---|---|
 | 课前 | 扫描明天日历，为每节课生成备课笔记骨架（含学生档案摘要、上次反馈），由装了 Skill 的 AI 补全教学目标与流程 | launchd 每日 10:00 自动 + 说「备课」 |
 | 课中 | 检测到会议（Zoom/腾讯会议/钉钉/飞书/Google Meet）自动录音，散会后使用本地 Whisper large-v3-turbo 转写全员文字稿；文字稿生成成功后自动删除原始 audio.wav | 常驻后台，全自动 |
-| 课后 | 自动归档文字稿并始终保留反馈任务；日历临时不可用时等待 AI 重试识别。装了 Skill 的 AI 依次完成家长反馈、学生档案更新和授课教师教学优化复盘 | 后台自动 + AI 周期任务 |
+| 课后 | 用 transcript-aware final match 确认学生身份，先建立 evidence-grounded `postclass-context.json`，再生成家长反馈、更新学生档案和教师教学优化复盘 | 后台自动 + AI 事件触发/失败补偿 |
 
 所有产出写入 Obsidian Vault 的「上课记录」分区：`备课内容 / 课堂文字稿 / 课后反馈 / 学生档案 / 教学优化`。
 
 ## 这套仓库里什么最重要
 
 - `SKILL.md`：给 AI 用的主说明书，定义整条课前/课中/课后流水线
+- `docs/postclass-context-spec.md`：课后反馈前的强制上下文 / 证据 gate
 - `docs/feedback-spec.md`：面向家长的课后反馈写作规范
 - `docs/teacher-review-spec.md`：面向授课教师的教学优化复盘规范
+- `scripts/validate_postclass_context.py`：阻止没有完整档案/本节证据的反馈生成
+- `scripts/validate_feedback_output.py`：检查四段结构和段落末尾标点风格
 - `scripts/`：录音、日历匹配、课前扫描、转写、反馈素材准备等实际执行脚本
 - `setup.sh`：新电脑一键安装入口
 
@@ -65,13 +68,13 @@ scripts/
   transcribe_audio.py     # 本地 Whisper Turbo 转写（自动分片）
 ```
 
-录音与文字稿存放在 `~/class-pipeline-data/`，日志在其 `logs/` 子目录。只有正式家长反馈、学生档案更新和教师教学优化复盘全部成功后，才会删除对应 session 的 `audio.wav`，并在同目录写入 `audio_deleted.txt` 记录删除时间、路径和释放字节数；待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核。`transcript.txt` / `transcript.json` 会保留。本地 Whisper 只负责这一步的语音转写，不负责备课内容、课后反馈正文或教师复盘。文字稿现在会一律归档到 Vault 的 `上课记录/课堂文字稿/`，AI 所需素材也会一律写入 `上课记录/课后反馈草稿/`。日历临时不可用时，任务会标为“待AI识别学生”并保留到后续重试，不会再静默跳过。正式家长反馈、学生档案更新和教师教学优化仍由装了该 skill 的 AI 完成；在 Codex 中应配置周期任务来自动消费这批待处理素材。
+录音与文字稿存放在 `~/class-pipeline-data/`，日志在其 `logs/` 子目录。只有 `postclass-context.json`、正式家长反馈、学生档案更新和教师教学优化复盘四项全部成功并通过验证后，才会删除对应 session 的 `audio.wav`，并在同目录写入 `audio_deleted.txt` 记录删除时间、路径和释放字节数；待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核。`transcript.txt` / `transcript.json` 会保留。本地 Whisper 只负责这一步的语音转写，不负责备课内容、课后反馈正文或教师复盘。文字稿现在会一律归档到 Vault 的 `上课记录/课堂文字稿/`，AI 所需素材也会一律写入 `上课记录/课后反馈草稿/`。日历临时不可用时，任务会标为“待AI识别学生”并保留到后续重试，不会再静默跳过。正式家长反馈、学生档案更新和教师教学优化仍由装了该 skill 的 AI 完成；在 Codex 中应配置周期任务来自动消费这批待处理素材。
 
 开课和散会提醒同时使用通知横幅与 8 秒自动关闭的可见对话框，避免 macOS 静默抑制横幅时没有任何提示。可随时运行 `bash scripts/meeting_watcher.sh notify-test` 验证弹窗链路。
 
 音频设置中，`PhysicsClass Multi-Output` 应勾选实际听课设备（本机为 `Mac mini扬声器`）和 `BlackHole 2ch`。Pipeline 开课时切换到该复制设备，散会后会恢复开课前实际使用的输出设备。
 
-课程匹配在开课时尝试锁定，临时读不到日历时会在录音期间每 60 秒重试，直到成功。转写与反馈素材准备完成后，`scripts/trigger_postclass_ai.sh` 会事件式启动一次本机 Codex，由安装了 Skill 的 Codex 读取完整文字稿，依次生成家长反馈、更新档案并生成教学优化复盘。这不是定时轮询；每天 10:00 的 Codex 自动任务仅作为失败重试与次日备课入口。
+课程身份现在采用两阶段确认：录音开始时的匹配只算 provisional；如果附近有多节紧邻课程就不会提前锁学生。完整转写后，Pipeline 会用文字稿第一段有效课堂语音对应的实际时间重新做 final match，因此“第一节取消、第二节实际开课”不会再沿用第一节的早期身份。随后 `scripts/trigger_postclass_ai.sh` 事件式启动本机 Codex，先完整读取本节文字稿 + 当前学生档案 + 最近反馈（以及可用的上一节文字稿/本次备课），建立并验证 `postclass-context.json`，再依次生成家长反馈、更新档案并生成教学优化复盘。这不是定时轮询；每天 10:00 的 Codex 自动任务仅作为失败重试与次日备课入口。
 
 ## 维护建议
 
@@ -79,3 +82,10 @@ scripts/
 - 改自动化行为时，优先更新 `scripts/`
 - 换电脑时先复制仓库，再运行 `bash setup.sh`
 - 只想迁移配置时，对照 `config.example.json`，不要直接提交自己的 `config.json`
+
+
+## v2.2 课后反馈证据规则
+
+`「3. 孩子当前待加强方向」` 不再直接复制学生档案中的历史问题。每个写给家长的问题必须在本节课中有可观察 evidence，并先记录到 `postclass-context.json`。历史问题若本节未再次出现，继续保留在学生档案中观察，但不机械重复到本节反馈
+
+反馈正文保留正常的段内标点，但每个段落或 bullet 最末尾不使用中文句号 `。` 或英文句点 `.`

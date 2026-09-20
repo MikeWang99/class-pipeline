@@ -58,7 +58,7 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 - **覆盖平台**：Zoom（zoom.us）、腾讯会议（wemeetapp/xmeet）、钉钉、飞书、Google Meet（Chrome/Safari 打开 meet.google.com 标签页）
 - **检测到开课**：启动 `PhysicsClassAudio`，分别捕获系统播放声和麦克风声；散会后合并成 `{recordings_dir}/sessions/{YYYY-MM-DD_HHMM}/audio.wav`。录音过程不检查 BlackHole、Multi-Output 或设备名称，任一原生采集通道未就绪时会保留诊断状态并阻止不可靠转写。
 - **检测到散会**（连续 45 秒无会议进程）：停止录音 → 写入 `audio_health.json` 检查文件是否为空，并对长录音写入 `transcription_preflight.json`，用本地 Turbo 抽样排除重复幻听。检查失败时保留音频、写明故障并跳过完整转写和反馈；健康时才使用本地 Whisper Turbo 转写 → 文字稿存 `transcript.txt` → **无论是否匹配到日历，都会先把文字稿归档到 Vault 的 `课堂文字稿/`** → 创建课后反馈待处理素材并交给当前 AI；只有正式家长反馈、学生档案更新和教师教学优化复盘都成功后才删除 `audio.wav` 及两份原始 `.caf` 通道（写入 `audio_deleted.txt` 删除记录），待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核
-- **课程身份锁定**：开课时立即按 session 时间匹配日历；若 EventKit 或 iCloud 当时短暂不可用，录音期间每 60 秒重试，直到将唯一的 `{SYSTEM}|{STUDENT}` 写入 `calendar_match.txt`。如果多个候选课在允许时间窗内接近，视为身份歧义，保留待处理队列，禁止按“最近的一节”猜学生。
+- **课程身份采用两阶段确认**：开课时只能做 provisional match；当同一时间窗存在多节紧邻课程时，不允许提前锁定任何学生。转写完成后，必须根据文字稿第一段有效课堂语音对应的实际时间重新做 transcript-aware final match，并写入 `calendar_match_final.txt`。正式反馈只能使用 final / confirmed identity，早期 `calendar_match.txt` 仅作审计线索，不能作为最终身份依据。若 final match 仍不唯一，保留待处理队列，禁止猜学生。
 
 用户无需任何手动操作。若用户说「开始上课/手动录音」，可直接运行 `bash {skill_dir}/scripts/meeting_watcher.sh once` 强制走一轮录音+转写。
 
@@ -67,14 +67,15 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 散会后 watcher 自动完成以下步骤：
 
 1. **归档文字稿与清理音频**：转写成功后，一律将 `transcript.txt` 加 front matter（日期/学生/体系/时长/是否匹配课程/文字稿来源/原始音频路径/音频保留策略）归档到 `{vault}/上课记录/课堂文字稿/`。若匹配到课程，则文件名为 `{YYYY-MM-DD} {体系} Class-{学生}.md`；若未匹配到课程，则文件名降级为 `{YYYY-MM-DD} 未匹配 Class-Session-{时戳}.md`，至少保证课堂文字稿不会丢。反馈素材生成和 AI 复核前先检查转写质量；只有正式反馈和学生档案更新成功后才删除 `audio.wav` 及两份 `.caf` 原始通道，并写入 `audio_deleted.txt` 删除记录。若文字稿主要是环境声、`multiple voices` 等占位标签，素材标记为“待人工确认录音”，不触发 AI、不删除原音频
-2. **自动准备反馈草稿素材**（无论日历是否临时可用）：`postclass_generate.sh` 读取转写稿 + 学生档案 + 上次反馈，生成一个待 AI 填写的反馈素材文件。已匹配时写入 `{vault}/上课记录/课后反馈草稿/{YYYY-MM-DD}-{学生}-feedback-materials.md`；未匹配时以 session 标识进入同一目录并标记为“待AI识别学生”，不能跳过。该素材稿只负责把来源材料和固定结构铺好，不负责生成正式反馈正文，也不会由 watcher 直接改写学生档案。学生名会做清洗并与档案模糊匹配（防日历标题污染）
-3. **事件式触发当前 AI**：素材生成后立即运行 `trigger_postclass_ai.sh`，只启动一次本机 `codex exec`。该 Codex 必须依次完成家长反馈、学生档案更新和教师教学优化复盘，读取 `docs/feedback-spec.md` 与 `docs/teacher-review-spec.md`，并写入 `ai_completed.txt`。它是课后事件触发，不是每 15 分钟轮询
+2. **自动准备完整上下文来源**：`postclass_generate.sh` 在 final identity 确认后，记录完整 raw transcript、当前完整学生档案、最近一次正式反馈、上一节课堂文字稿、本次备课文件等来源路径；素材中的 transcript excerpt 只用于快速浏览，不能替代完整读取
+3. **强制建立课后 Context Gate**：正式反馈前，AI 必须先读取 `docs/postclass-context-spec.md`，生成 session 内的 `postclass-context.json`，并通过 `scripts/validate_postclass_context.py`。Context 至少包含当前进度、上节课承接、本节实际内容、本节可观察的进步/困难、问题状态变化和下节课计划
+4. **事件式触发当前 AI**：`trigger_postclass_ai.sh` 只在 final identity + context gate 可完成时启动一次本机 `codex exec`。执行顺序固定为：`postclass-context.json → 正式家长反馈 → 学生档案更新 → 教师教学优化复盘`。四项全部存在并通过验证后才写完整完成标记、清理音频；这是课后事件触发，不是每 15 分钟轮询
 
 **通知逻辑**：
 - 有日历日程：「转写完成，文字稿已归档，反馈素材已准备好（家长反馈、档案和教学优化待 AI 完成）✅」
 - 未匹配到课程：「转写完成，文字稿已归档；课程待重新识别，反馈任务已保留」
 
-**AI 生成部分**：用户说「生成反馈」「精修反馈」「更新档案」时，AI 读取 `课后反馈草稿/` 里的素材稿、课堂文字稿与学生档案，按本 skill 内置规范 `docs/feedback-spec.md` 生成正式反馈，并写入 `{vault}/上课记录/课后反馈/{YYYY-MM-DD}-{学生}-feedback.md`，同时按规范的台账更新规则同步 `{vault}/上课记录/学生档案/{学生}.md`。随后必须读取 `docs/teacher-review-spec.md`，将本节课给授课教师的教学优化复盘写入 `{vault}/上课记录/教学优化/{YYYY-MM-DD} {体系} Class-{学生}-教学优化.md`，并维护同目录的 `教学优化总览.md`。完成标记应写入 session 的 `ai_completed.txt`；素材 front matter 中的 `formal_feedback` 和 `teacher_review` 只是可选元数据，不是完成条件，完成标记中的两个文件路径才是清理音频前的验证依据。
+**AI 生成部分**：用户说「生成反馈」「精修反馈」「更新档案」时，AI 必须先完整读取 raw transcript、当前完整学生档案、最近一次正式反馈；存在上一节课堂文字稿与本次备课时也要读取。然后先生成并验证 `postclass-context.json`，再按 `docs/feedback-spec.md` 生成正式反馈。**本节课文字稿证据的优先级高于历史档案措辞**：历史问题如果本节课没有新的可观察证据，继续保留在学生档案，但不得机械重复到「孩子当前待加强方向」。正式反馈后同步更新 `{vault}/上课记录/学生档案/{学生}.md` 的当前进度、问题状态与下节课承接，再生成教师复盘。完成标记 `ai_completed.txt` 必须明确写出 `formal_feedback`、`student_profile`、`teacher_review`、`postclass_context` 四个有效路径；Pipeline 还会验证原有学生档案确实发生更新，四项未全部通过时不得清理音频。
 
 每天 10:00 的 Codex 定时任务保留为失败补偿与次日备课入口：扫描 `课后反馈草稿/` 中仍处于“待AI生成 / 待AI识别学生”的文件，以及已生成家长反馈但缺少教师教学优化复盘的 session，先重试日历匹配，再由当前宿主 AI 按完整闭环生成正式反馈、更新档案和教学优化。日历暂时不可用时保留任务，不得猜学生或标记完成。本地 Whisper 只负责转写，不参与正文生成。
 
@@ -83,15 +84,17 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 完整的课后反馈写作规范在 `docs/feedback-spec.md`，原为独立的 parent-lesson-feedback skill，现已融合为本 pipeline 的一部分。任何由 AI 生成/精修课后反馈的场景（AI 手动生成、用户直接要求写反馈）都必须遵循该文档：
 
 - 四段式结构：「1. 本节课内容」「2. 本节课进步」「3. 孩子当前待加强方向」「4. 后续计划」
-- 证据优先：一切判断必须有文字稿中的可观察证据，信息不足时先向用户提问而不是编造
-- 问题台账连续性：与学生档案「主要问题」保持用词一致，带（本节课新增）/（历史问题）括号标签，老问题不许凭空消失
-- 篇幅 400-600 字，面向不懂物理的家长，第一人称「我」
+- Context gate：必须先生成并验证 `postclass-context.json`，再写正式反馈
+- 证据优先：本节课完整文字稿是进步/问题判断的最高优先级；所有第 3 部分问题必须有本节课 evidence
+- 问题台账连续性：历史问题不许从学生档案凭空消失，但本节未观察到时不要机械重复进家长反馈
+- 篇幅默认 350–550 字，面向不懂物理的家长，第一人称「我」
 - 文风要具体、定制化：优先直接点名学生（如“Eden 这次……”或“Julian 已经……”），避免整篇只写“学生”“孩子”这种泛称
 - 如果本节课的文字稿足够具体，反馈里要落到这位学生实际做过的动作、说过的话、卡住的点和修正后的变化，避免模板化概括
 - 「1. 本节课内容」必须先给整体框架，再给 1–3 个主要模块；不要把整节课缩成某一道题的单题讲解
 - 「2. 本节课进步」不要使用 `1. 2. 3. 4.` 这类编号列表；优先用“模块名：一句简述”的要点式写法，或模块标题配简短项目符号
 - 「4. 后续计划」必须拆成「课后练习安排」和「下节课安排」两个小节：前者只写老师明确布置或需要完成的课后练习，后者只写下一节课的教学安排；没有明确作业时不要自行编造
 - 反馈正文不要使用加粗、下划线等强调格式；标题之外尽量保持纯文本风格
+- 段落或 bullet 的末尾不加中文句号 `。` 或英文句点 `.`；仅去掉末尾句号，段内正常标点保持不变
 
 台账即学生档案：`{vault}/上课记录/学生档案/{学生}.md`，反馈定稿后按其「主要问题」的更新规则同步。
 
@@ -107,4 +110,4 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 | 文字稿只有环境声或占位标签 | 反馈素材会标记为“待人工确认录音”，不会调用 AI 生成反馈，也不会删除原始音频；先检查 `system_audio_status.txt` 和系统音频录制权限 |
 | 录音只有教师声音或出现重复幻听 | 检查 `audio_route.txt`、`audio_health.json` 和两份 `.caf` 原始通道；确认 `PhysicsClassAudio` 的系统音频录制权限已打开。Pipeline 会保留音频并跳过不可靠转写。 |
 | 定时任务没跑 | `launchctl list \| grep physicsclass` 确认任务在；plist 在 `~/Library/LaunchAgents/` |
-| 明明 UI 里有 Google 日历事件，但脚本没扫到 | 先确认系统“日历”权限已给 PhysicsClassScanner；查询脚本会重试 EventKit，并使用后台 AppleScript 读取 Calendar 数据，课后再优先回退到备课笔记里的 `event_start` 元数据做匹配。多个候选时间接近时会保留“待识别学生”，不会为了刷新权限主动打开 Calendar 窗口，也不会猜学生 |
+| 明明 UI 里有 Google 日历事件，但脚本没扫到 | 先确认系统“日历”权限已给 PhysicsClassScanner；查询脚本会重试 EventKit，并使用后台 AppleScript fallback。课中只允许 provisional match；课后必须用文字稿第一段有效课堂语音的实际时间做 final match。多个候选仍不唯一时保留“待识别学生”，不会猜学生 |
