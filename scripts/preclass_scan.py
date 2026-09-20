@@ -49,6 +49,30 @@ def parse_event(summary: str, keyword: str):
     return None
 
 
+def parse_query_row(line: str):
+    """Parse normalized calendar rows: title, start, end, notes.
+
+    Legacy three-column rows (title, start, notes) remain supported.
+    """
+    parts = line.split("\t")
+    if len(parts) < 2:
+        return None
+    summary, start_str = parts[0].strip(), parts[1].strip()
+    event_end = ""
+    notes = ""
+    if len(parts) > 2:
+        candidate = parts[2].strip()
+        try:
+            datetime.fromisoformat(candidate)
+        except ValueError:
+            notes = parts[2]
+        else:
+            event_end = candidate
+    if len(parts) > 3:
+        notes = parts[3]
+    return summary, start_str, event_end, notes
+
+
 def read_head(path: Path, max_lines: int = 80) -> str:
     if not path.exists():
         return ""
@@ -63,7 +87,7 @@ def latest_file_for_student(folder: Path, student: str) -> Path | None:
     return hits[-1] if hits else None
 
 
-def update_existing_note_metadata(path: Path, event_start: str, calendar_title: str) -> bool:
+def update_existing_note_metadata(path: Path, event_start: str, event_end: str, calendar_title: str) -> bool:
     text = path.read_text(encoding="utf-8", errors="replace")
     if not text.startswith("---\n"):
         return False
@@ -78,7 +102,7 @@ def update_existing_note_metadata(path: Path, event_start: str, calendar_title: 
         return False
 
     frontmatter_lines = lines[1:end_idx]
-    keys = {"event_start": event_start, "calendar_title": calendar_title}
+    keys = {"event_start": event_start, "event_end": event_end, "calendar_title": calendar_title}
     changed = False
     seen = set()
 
@@ -107,7 +131,7 @@ def update_existing_note_metadata(path: Path, event_start: str, calendar_title: 
     return True
 
 
-def build_skeleton(when: str, system: str, student: str, event_start: str, calendar_title: str, notes: str,
+def build_skeleton(when: str, system: str, student: str, event_start: str, event_end: str, calendar_title: str, notes: str,
                    profile_md: str, last_feedback_md: str, last_prep_md: str) -> str:
     return f"""---
 date: {when}
@@ -115,6 +139,7 @@ system: {system}
 student: {student}
 status: 待AI补全
 event_start: {event_start}
+event_end: {event_end}
 calendar_title: {calendar_title}
 ---
 
@@ -218,18 +243,17 @@ def main() -> None:
         created = 0
         refreshed = 0
         for line in events_output.splitlines():
-            parts = line.split("\t")
-            if len(parts) < 2:
+            row = parse_query_row(line)
+            if not row:
                 continue
-            summary, start_str = parts[0].strip(), parts[1].strip()
-            notes = parts[2] if len(parts) > 2 else ""
+            summary, start_str, event_end, notes = row
             parsed = parse_event(summary, keyword)
             if not parsed:
                 continue
             system, student = parsed
             target = prep_dir / f"{target_date} {system} Class-{student}.md"
             if target.exists():
-                if update_existing_note_metadata(target, start_str, summary):
+                if update_existing_note_metadata(target, start_str, event_end, summary):
                     refreshed += 1
                     log(f"refreshed prep metadata: {target.name}")
                 log(f"skip existing prep note: {target.name}")
@@ -240,7 +264,7 @@ def main() -> None:
             last_feedback = read_head(latest_file_for_student(feedback_dir, student) or Path("/nonexistent"), 60)
             last_prep = read_head(latest_file_for_student(prep_dir, student) or Path("/nonexistent"), 40)
 
-            skeleton = build_skeleton(target_date, system, student, start_str, summary, notes,
+            skeleton = build_skeleton(target_date, system, student, start_str, event_end, summary, notes,
                                       profile, last_feedback, last_prep)
 
             target.write_text(skeleton, encoding="utf-8")

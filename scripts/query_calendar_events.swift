@@ -9,8 +9,7 @@ let target: Date
 
 if let offset = Int(argument) {
     guard let computed = calendar.date(byAdding: .day, value: offset, to: Date()) else {
-        fputs("failed to compute target date\n", stderr)
-        exit(1)
+        fputs("failed to compute target date\n", stderr); exit(1)
     }
     target = computed
 } else {
@@ -19,76 +18,45 @@ if let offset = Int(argument) {
     formatter.locale = Locale(identifier: "en_US_POSIX")
     formatter.timeZone = TimeZone.current
     formatter.dateFormat = "yyyy-MM-dd"
-
     guard let parsed = formatter.date(from: argument) else {
-        fputs("invalid date argument: expected day offset or yyyy-MM-dd\n", stderr)
-        exit(1)
+        fputs("invalid date argument: expected day offset or yyyy-MM-dd\n", stderr); exit(1)
     }
     target = parsed
 }
 
 let start = calendar.startOfDay(for: target)
-guard let end = calendar.date(byAdding: .day, value: 1, to: start) else {
-    fputs("failed to compute end date\n", stderr)
-    exit(1)
-}
-
-let store = EKEventStore()
-let semaphore = DispatchSemaphore(value: 0)
-var exitCode: Int32 = 0
+guard let end = calendar.date(byAdding: .day, value: 1, to: start) else { exit(1) }
+let store = EKEventStore(); let semaphore = DispatchSemaphore(value: 0); var exitCode: Int32 = 0
 
 func printEvents() {
     let predicate = store.predicateForEvents(withStart: start, end: end, calendars: nil)
     let events = store.events(matching: predicate).sorted { lhs, rhs in
-        if lhs.startDate == rhs.startDate {
-            return (lhs.title ?? "") < (rhs.title ?? "")
-        }
+        if lhs.startDate == rhs.startDate { return (lhs.title ?? "") < (rhs.title ?? "") }
         return lhs.startDate < rhs.startDate
     }
-
-    let formatter = ISO8601DateFormatter()
-    formatter.timeZone = TimeZone.current
-    formatter.formatOptions = [.withInternetDateTime]
-
+    let formatter = ISO8601DateFormatter(); formatter.timeZone = TimeZone.current; formatter.formatOptions = [.withInternetDateTime]
     for event in events {
         let summary = (event.title ?? "").replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ")
         let startText = formatter.string(from: event.startDate)
+        let endText = formatter.string(from: event.endDate)
         let notes = (event.notes ?? "").replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ")
-        print("\(summary)\t\(startText)\t\(notes)")
+        print("\(summary)\t\(startText)\t\(endText)\t\(notes)")
     }
 }
 
 if #available(macOS 14.0, *) {
     store.requestFullAccessToEvents { granted, error in
         defer { semaphore.signal() }
-        if let error {
-            fputs("calendar access error: \(error.localizedDescription)\n", stderr)
-            exitCode = 1
-            return
-        }
-        guard granted else {
-            fputs("calendar access denied\n", stderr)
-            exitCode = 1
-            return
-        }
+        if let error { fputs("calendar access error: \(error.localizedDescription)\n", stderr); exitCode = 1; return }
+        guard granted else { fputs("calendar access denied\n", stderr); exitCode = 1; return }
         printEvents()
     }
 } else {
     store.requestAccess(to: .event) { granted, error in
         defer { semaphore.signal() }
-        if let error {
-            fputs("calendar access error: \(error.localizedDescription)\n", stderr)
-            exitCode = 1
-            return
-        }
-        guard granted else {
-            fputs("calendar access denied\n", stderr)
-            exitCode = 1
-            return
-        }
+        if let error { fputs("calendar access error: \(error.localizedDescription)\n", stderr); exitCode = 1; return }
+        guard granted else { fputs("calendar access denied\n", stderr); exitCode = 1; return }
         printEvents()
     }
 }
-
-semaphore.wait()
-exit(exitCode)
+semaphore.wait(); exit(exitCode)

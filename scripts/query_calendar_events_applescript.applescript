@@ -30,7 +30,6 @@ on run argv
     set mm to (text 6 thru 7 of dateText) as integer
     set dd to (text 9 thru 10 of dateText) as integer
     set monthValues to {January, February, March, April, May, June, July, August, September, October, November, December}
-
     set dayStart to current date
     set year of dayStart to yyyy
     set month of dayStart to item mm of monthValues
@@ -56,12 +55,12 @@ on run argv
                     set eventNotes to my replaceText(eventNotes, return, " ")
                     set eventNotes to my replaceText(eventNotes, linefeed, " ")
                     set eventStart to start date of eventRef
-                    set end of outputLines to (calendarName & tab & eventSummary & tab & (my iso8601(eventStart)) & tab & eventNotes)
+                    set eventEnd to end date of eventRef
+                    set end of outputLines to (calendarName & tab & eventSummary & tab & (my iso8601(eventStart)) & tab & (my iso8601(eventEnd)) & tab & eventNotes)
                 end repeat
             end try
         end repeat
     end tell
-
     set AppleScript's text item delimiters to linefeed
     return outputLines as text
 end run

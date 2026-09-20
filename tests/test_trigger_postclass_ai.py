@@ -32,6 +32,37 @@ class TriggerPostclassAITests(unittest.TestCase):
             self.assertIn("would trigger Codex", result.stdout)
             self.assertFalse((session / ".ai_trigger.pid").exists())
 
+    def test_unmatched_material_does_not_trigger_without_unique_identity(self):
+        with tempfile.TemporaryDirectory(prefix="physicsclass-ai-trigger-") as tmp:
+            session = Path(tmp) / "2026-08-28_120000"
+            session.mkdir()
+            material = Path(tmp) / "materials.md"
+            material.write_text(
+                "status: 待AI识别学生\ncalendar_match_status: unmatched\n",
+                encoding="utf-8",
+            )
+            fake_codex = Path(tmp) / "fake-codex.sh"
+            fake_codex.write_text(
+                "#!/bin/bash\n"
+                f"printf '%s\\n' 'unexpected' > {tmp}/triggered\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            env = os.environ.copy()
+            env["CODEX_BIN"] = str(fake_codex)
+            env["CALENDAR_QUERY_SCRIPT"] = "/usr/bin/false"
+
+            result = subprocess.run(
+                ["bash", str(SCRIPT), str(session), str(material)],
+                check=True,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.stdout, "")
+            self.assertFalse((Path(tmp) / "triggered").exists())
+
     def test_completed_session_does_not_trigger(self):
         with tempfile.TemporaryDirectory(prefix="physicsclass-ai-trigger-") as tmp:
             session = Path(tmp) / "2026-08-28_120000"
@@ -83,6 +114,42 @@ class TriggerPostclassAITests(unittest.TestCase):
             self.assertFalse((session / "system_audio.caf").exists())
             self.assertFalse((session / "microphone_audio.caf").exists())
             self.assertTrue((session / "audio_deleted.txt").exists())
+
+    def test_new_context_session_without_evidence_is_not_considered_complete(self):
+        with tempfile.TemporaryDirectory(prefix="physicsclass-ai-trigger-") as tmp:
+            session = Path(tmp) / "2026-09-20_100000"
+            session.mkdir()
+            review = Path(tmp) / "teacher-review.md"
+            review.write_text("review\n", encoding="utf-8")
+            transcript = Path(tmp) / "transcript.txt"
+            transcript.write_text(
+                "[00:10] lesson\n[00:20] evidence\n[00:30] more\n",
+                encoding="utf-8",
+            )
+            (session / "feedback_context.json").write_text(
+                '{"schema_version":"2.2","student":"David","sources":'
+                f'{{"current_transcript":"{transcript}","current_profile":null,'
+                '"previous_feedback":null,"previous_transcript":null,'
+                '"current_prep":null,"next_prep":null}}}',
+                encoding="utf-8",
+            )
+            (session / "ai_completed.txt").write_text(
+                f"teacher_review: {review}\n", encoding="utf-8"
+            )
+            material = Path(tmp) / "materials.md"
+            material.write_text("status: 待AI生成\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["TRIGGER_POSTCLASS_AI_DRY_RUN"] = "1"
+
+            result = subprocess.run(
+                ["bash", str(SCRIPT), str(session), str(material)],
+                check=True,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertIn("would trigger Codex", result.stdout)
 
     def test_worker_accepts_marker_feedback_path_without_material_metadata(self):
         with tempfile.TemporaryDirectory(prefix="physicsclass-ai-trigger-") as tmp:
