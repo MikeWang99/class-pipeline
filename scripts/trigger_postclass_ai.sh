@@ -76,7 +76,7 @@ prepare_material_identity() {
       return 0
       ;;
     *)
-      log "AI trigger withheld; calendar identity is unresolved or ambiguous (session=$session_dir)"
+      log "calendar identity unresolved or ambiguous; Codex must reconcile from transcript + candidate profiles/prep and may not guess (session=$session_dir)"
       return 2
       ;;
   esac
@@ -120,7 +120,8 @@ worker() {
   prepare_material_identity "$session_dir" "$material_file"
   case "$?" in
     0) material_file="$PREPARED_MATERIAL" ;;
-    2|3) return 0 ;;
+    2) material_file="$PREPARED_MATERIAL" ;;
+    3) return 0 ;;
     *) return 1 ;;
   esac
 
@@ -190,21 +191,14 @@ LOCK_FILE="$SESSION_DIR/.ai_trigger.pid"
 
 [ -d "$SESSION_DIR" ] || { log "AI trigger rejected; no session: $SESSION_DIR"; exit 1; }
 [ -f "$MATERIAL_FILE" ] || { log "AI trigger rejected; no material: $MATERIAL_FILE"; exit 1; }
-has_teacher_review "$SESSION_DIR" && {
+completion_ready "$SESSION_DIR" && {
   cleanup_recording "$SESSION_DIR" || true
-  log "AI trigger skipped; already complete including teacher review: $SESSION_DIR"
+  log "AI trigger skipped; already complete including evidence + profile + teacher review: $SESSION_DIR"
   exit 0
 }
 if [ -s "$SESSION_DIR/ai_completed.txt" ]; then
   log "AI trigger resuming; completion marker exists but teacher review is missing: $SESSION_DIR"
 fi
-
-prepare_material_identity "$SESSION_DIR" "$MATERIAL_FILE"
-case "$?" in
-  0) MATERIAL_FILE="$PREPARED_MATERIAL" ;;
-  2|3) exit 0 ;;
-  *) exit 1 ;;
-esac
 
 if [ -f "$LOCK_FILE" ]; then
   existing_pid="$(cat "$LOCK_FILE" 2>/dev/null || true)"
