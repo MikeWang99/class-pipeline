@@ -230,9 +230,8 @@ def main() -> None:
             if len(parts) < 2:
                 continue
             summary, start_str = parts[0].strip(), parts[1].strip()
-            # Swift v2.2 emits title/start/end/event_id/notes.
-            # AppleScript fallback remains calendar/title/start/notes and is
-            # normalized by query_calendar_events.sh only for matching paths.
+            # query_calendar_events.sh normalizes both Swift and AppleScript
+            # sources to title/start/end/event_id/notes.
             if len(parts) >= 5:
                 end_str = parts[2].strip()
                 event_id = parts[3].strip()
