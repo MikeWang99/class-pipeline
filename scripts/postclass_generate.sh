@@ -120,7 +120,7 @@ generated_by: material-pipeline-only
 - feedback 完成后同步更新学生档案，记录本次进度、问题状态变化、下一课承接
 - 如果 status 为“待AI识别学生”，先做 transcript-aware final calendar match；身份不唯一时保留队列，绝不能猜学生
 - 如果 status 为“待人工确认录音”，不得生成正式家长反馈、不得更新学生问题台账、不得删除原始音频
-- 反馈遵循 docs/feedback-spec.md；段落和 bullet 最末尾不要加 `。` 或英文 `.`，句内标点正常使用
+- 反馈遵循 docs/feedback-spec.md；段落和 bullet 最末尾不要加中文句号或英文句点，句内标点正常使用
 - 家长反馈与档案更新后继续按 docs/teacher-review-spec.md 生成教师复盘
 - 只有 context、正式反馈、学生档案更新、教师复盘全部通过验证后，才改为“已完成”并写 ai_completed.txt
 
