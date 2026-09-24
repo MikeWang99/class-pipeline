@@ -1,4 +1,4 @@
-# v2.3.0 / v2.3.1
+# v2.3.0 / v2.3.1 / v2.3.2
 
 ## 安装即用与可诊断性
 
@@ -10,3 +10,4 @@
 - 修正 Codex skill 链接名称，统一使用 class-pipeline，并保留旧名称兼容链接
 - 更新 README，移除已过时的 BlackHole / Multi-Output 安装说明
 - v2.3.1 修复 setup.sh 中两处多行 shell 命令的换行问题
+- v2.3.2 让默认 agent 在任何 Pipeline 任务前自动执行健康检查和首次初始化

@@ -1,7 +1,7 @@
 interface:
   display_name: "教学 Pipeline"
   short_description: "物理课前备课、录音转写与证据驱动课后反馈流水线"
-  default_prompt: "Use $class-pipeline for lesson preparation or post-class processing. For post-class feedback, confirm the final student identity, build and validate postclass-context.json from the complete transcript and current student profile, then generate feedback, update the profile, and create the teacher review."
+  default_prompt: "Use $class-pipeline for every Class Pipeline task. Before any work, run the skill healthcheck; if config.json is missing or the healthcheck is not ready, automatically run setup.sh --auto and finish the initialization steps before continuing. For post-class feedback, confirm the final student identity, build and validate postclass-context.json from the complete transcript and current student profile, then generate feedback, update the profile, and create the teacher review."
 
 policy:
   allow_implicit_invocation: true

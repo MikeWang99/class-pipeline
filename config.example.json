@@ -1,5 +1,5 @@
 {
-  "skill_version": "2.3.1",
+  "skill_version": "2.3.2",
   "vault_path": "/absolute/path/to/your/Obsidian Vault",
   "recordings_dir": "/Users/yourname/physics-class-pipeline-data",
   "calendar_keyword": "Class",
