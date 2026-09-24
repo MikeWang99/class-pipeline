@@ -252,7 +252,9 @@ ok "系统声音 + 麦克风双路采集：$APP_AUDIO"
 ok "不依赖 BlackHole、Multi-Output 或固定的扬声器名称"
 if [ -t 0 ] && [ -t 1 ]; then
   permission_probe_dir="$(mktemp -d "$DATA_DIR/.permission-probe.XXXXXX")"
-  "$APP_AUDIO" "$permission_probe_dir/system.caf" +    "$permission_probe_dir/microphone.caf" "$permission_probe_dir/status.txt" +    >/dev/null 2>&1 &
+  "$APP_AUDIO" "$permission_probe_dir/system.caf" \
+    "$permission_probe_dir/microphone.caf" "$permission_probe_dir/status.txt" \
+    >/dev/null 2>&1 &
   permission_probe_pid=$!
   sleep 2
   kill -TERM "$permission_probe_pid" 2>/dev/null || true
@@ -333,7 +335,8 @@ mkdir -p "$DATA_DIR/sessions" "$DATA_DIR/logs"
 # note folders in vault (Obsidian creates on demand, but pre-create for clarity)
 if [ -n "$VAULT" ]; then
   mkdir -p "$VAULT/上课记录/备课内容" "$VAULT/上课记录/课堂文字稿" \
-           "$VAULT/上课记录/课后反馈" "$VAULT/上课记录/课后反馈草稿" +           "$VAULT/上课记录/学生档案" "$VAULT/上课记录/教学优化"
+           "$VAULT/上课记录/课后反馈" "$VAULT/上课记录/课后反馈草稿" \
+           "$VAULT/上课记录/学生档案" "$VAULT/上课记录/教学优化"
   ok "Vault 笔记分区已就绪：上课记录/{备课内容,课堂文字稿,课后反馈,课后反馈草稿,学生档案,教学优化}"
 fi
 

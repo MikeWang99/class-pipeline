@@ -1,4 +1,4 @@
-# v2.3.0
+# v2.3.0 / v2.3.1
 
 ## 安装即用与可诊断性
 
@@ -9,3 +9,4 @@
 - 新增 scripts/healthcheck.sh，验证 Vault、录音组件、转写依赖和 launchd 后台任务
 - 修正 Codex skill 链接名称，统一使用 class-pipeline，并保留旧名称兼容链接
 - 更新 README，移除已过时的 BlackHole / Multi-Output 安装说明
+- v2.3.1 修复 setup.sh 中两处多行 shell 命令的换行问题
