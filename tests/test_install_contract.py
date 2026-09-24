@@ -22,5 +22,5 @@ class InstallContractTests(unittest.TestCase):
 
     def test_runtime_config_template_has_resolved_cli(self):
         config = (ROOT / "config.example.json").read_text(encoding="utf-8")
-        self.assertIn('"skill_version": "2.3.1"', config)
+        self.assertIn('"skill_version": "2.3.3"', config)
         self.assertIn('"whisper_cli"', config)

@@ -31,7 +31,7 @@ cd class-pipeline
 bash setup.sh --auto
 ```
 
-`setup.sh --auto` 一键完成：自动安装 Homebrew、ffmpeg 和 whisper-cpp → 自动下载 Whisper Turbo 模型 → 探测 Obsidian Vault → 写 `config.json` → 创建原生音频采集助手 → 注册 launchd 任务 → 运行健康检查 → 链接到 `~/.codex/skills/class-pipeline`。重复运行安全。
+`setup.sh --auto` 一键完成：自动安装 Homebrew、ffmpeg 和 whisper-cpp（系统目录不可写时自动安装到用户目录）→ 自动下载 Whisper Turbo 模型 → 探测 Obsidian Vault → 写 `config.json` → 创建原生音频采集助手 → 注册 launchd 任务 → 运行健康检查 → 链接到 `~/.codex/skills/class-pipeline`。重复运行安全。
 
 仓库里附带一份 `config.example.json`，方便把这套 skill 迁移到新电脑或分享给别的 AI 环境时快速对照配置结构；实际运行仍以 `setup.sh` 生成的本地 `config.json` 为准。
 
@@ -42,7 +42,7 @@ bash setup.sh --auto
 ## 依赖
 
 - macOS（日历 / launchd / EventKit / osascript）
-- Homebrew、ffmpeg、whisper-cpp、python3、swift（setup 会自动安装缺失的 Homebrew/ffmpeg/whisper-cpp）
+- Homebrew、ffmpeg、whisper-cpp、python3、swift（setup 会自动安装缺失的依赖；没有管理员权限时使用用户目录 Homebrew）
 - 本地 Whisper 运行时：setup 会自动安装 whisper-cpp，并写入实际 CLI 和模型路径
 - 日历事件命名：`{体系} Class-{学生名}`，如 `CIE Class-Sujal`
 

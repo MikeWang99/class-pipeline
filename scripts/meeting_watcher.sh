@@ -13,7 +13,7 @@
 set -u
 
 # launchd / .app contexts have a minimal PATH; add common Homebrew locations
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/.local/Homebrew/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(dirname "$SCRIPT_DIR")"

@@ -26,6 +26,7 @@ export CLASS_PIPELINE_VERSION="$SKILL_VERSION"
 VAULT_OVERRIDE="${VAULT_PATH:-}"
 WHISPER_MODEL_PATH="${WHISPER_MODEL:-$HOME/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin}"
 WHISPER_MODEL_URL="${WHISPER_MODEL_URL:-https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin?download=true}"
+USER_BREW_ROOT="${CLASS_PIPELINE_BREW_ROOT:-$HOME/.local/Homebrew}"
 
 usage() {
   cat <<'EOF'
@@ -71,7 +72,7 @@ step() { echo; echo "==> $*"; }
 
 add_brew_to_path() {
   local brew_bin
-  for brew_bin in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+  for brew_bin in /opt/homebrew/bin/brew /usr/local/bin/brew "$USER_BREW_ROOT/bin/brew"; do
     if [ -x "$brew_bin" ]; then
       eval "$("$brew_bin" shellenv)"
       return 0
@@ -94,11 +95,30 @@ ensure_brew() {
     fail "缺少 curl，无法自动安装 Homebrew"
     return 1
   }
-  warn "未安装 Homebrew，正在运行官方安装程序..."
-  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || {
-    fail "Homebrew 安装失败"
-    return 1
-  }
+  if command -v git >/dev/null 2>&1 && [ -w "$HOME" ]; then
+    warn "系统 Homebrew 不可用，正在用户目录安装 Homebrew（不需要管理员权限）..."
+    mkdir -p "$(dirname "$USER_BREW_ROOT")"
+    if [ ! -d "$USER_BREW_ROOT/.git" ]; then
+      git clone --depth 1 https://github.com/Homebrew/brew "$USER_BREW_ROOT" || {
+        fail "用户目录 Homebrew 下载失败"
+        return 1
+      }
+    else
+      ok "用户目录 Homebrew 已存在：$USER_BREW_ROOT"
+    fi
+    # A non-standard prefix cannot rely on the normal installer to create
+    # these directories because that installer assumes /opt/homebrew.
+    mkdir -p "$USER_BREW_ROOT/var/homebrew/locks" "$USER_BREW_ROOT/Cellar" \
+      "$USER_BREW_ROOT/Library/Taps"
+    add_brew_to_path || true
+  fi
+  if ! command -v brew >/dev/null 2>&1; then
+    warn "用户目录 Homebrew 不可用，正在运行官方安装程序..."
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || {
+      fail "Homebrew 安装失败"
+      return 1
+    }
+  fi
   add_brew_to_path || true
   command -v brew >/dev/null 2>&1 || {
     fail "Homebrew 安装后仍无法找到 brew"

@@ -30,7 +30,7 @@ description: 物理教学课前/课中/课后全链路自动化。课前定时�
 skill installer 复制完本目录后，当前 Skill 第一次被触发时必须自举完成运行时初始化：
 
 1. 运行 bash {skill_dir}/setup.sh --auto
-2. 让 setup 自动安装缺失的 Homebrew、ffmpeg 和 whisper-cpp，并下载默认 Whisper Turbo 模型
+2. 让 setup 自动安装缺失的 Homebrew、ffmpeg 和 whisper-cpp，并下载默认 Whisper Turbo 模型；若系统 Homebrew 目录不可写，自动回退到用户目录
 3. 自动探测 Obsidian Vault，写入 config.json，创建笔记分区、录音目录和 launchd 后台任务
 4. 运行 bash {skill_dir}/scripts/healthcheck.sh，只有显示 READY 才开始依赖后台录音
 
@@ -44,7 +44,7 @@ skill installer 复制完本目录后，当前 Skill 第一次被触发时必须
 bash {skill_dir}/setup.sh --auto
 ```
 
-setup.sh 会自动完成：依赖检查与安装（Homebrew/ffmpeg/whisper-cpp/python3/swift）→ 自动下载本地 Whisper Turbo 模型 → 编译并注册原生 `PhysicsClassAudio` 采集助手 → 探测 Obsidian Vault → 写入 `config.json` → 创建后台应用 PhysicsClassWatcher/PhysicsClassScanner 并注册两个 launchd 任务（每日 10:00 课前扫描 + 常驻会议监听）→ 运行健康检查。首次运行只需按 macOS 提示授予采集和日历权限；全程打印每一步结果。卸载用 `uninstall.sh`。
+setup.sh 会自动完成：依赖检查与安装（Homebrew/ffmpeg/whisper-cpp/python3/swift）→ 自动下载本地 Whisper Turbo 模型 → 编译并注册原生 `PhysicsClassAudio` 采集助手 → 探测 Obsidian Vault → 写入 `config.json` → 创建后台应用 PhysicsClassWatcher/PhysicsClassScanner 并注册两个 launchd 任务（每日 10:00 课前扫描 + 常驻会议监听）→ 运行健康检查。系统 Homebrew 目录不可写时会自动使用用户目录安装，首次运行只需按 macOS 提示授予采集和日历权限；全程打印每一步结果。卸载用 `uninstall.sh`。
 
 ## 2. 课前：备课内容生成
 
@@ -118,7 +118,7 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 | 录音时长明显短于实际课程 | 检查 `recording_started_at.txt`、`recording_stopped_at.txt` 与 `recording_incomplete`；先修复音频路由，再重新上课，不能拿不完整录音生成反馈 |
 | 没检测到开会 | 运行 `bash scripts/meeting_watcher.sh once` 看检测日志；浏览器开 Meet 需在 Chrome/Safari 且标签页可见 |
 | 原生采集权限未通过 | 打开 系统设置→隐私与安全性→麦克风，以及“屏幕与系统音频录制”，把 `PhysicsClassAudio` 打开后重新测试 |
-| 转写失败 | 先看 `{recordings_dir}/logs/watcher.log`；确认 `/opt/homebrew/bin/whisper-cli` 与 `~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin` 存在，或设置 `WHISPER_CLI` / `WHISPER_MODEL` 指向本地安装 |
+| 转写失败 | 先看 `{recordings_dir}/logs/watcher.log`；确认 `config.json` 中的 `whisper_cli` 与 `~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin` 存在，或设置 `WHISPER_CLI` / `WHISPER_MODEL` 指向本地安装 |
 | 文字稿只有环境声或占位标签 | 反馈素材会标记为“待人工确认录音”，不会调用 AI 生成反馈，也不会删除原始音频；先检查 `system_audio_status.txt` 和系统音频录制权限 |
 | 录音只有教师声音或出现重复幻听 | 检查 `audio_route.txt`、`audio_health.json` 和两份 `.caf` 原始通道；确认 `PhysicsClassAudio` 的系统音频录制权限已打开。Pipeline 会保留音频并跳过不可靠转写。 |
 | 定时任务没跑 | `launchctl list \| grep physicsclass` 确认任务在；plist 在 `~/Library/LaunchAgents/` |
