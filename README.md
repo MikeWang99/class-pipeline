@@ -28,51 +28,43 @@
 ```bash
 git clone https://github.com/<you>/class-pipeline.git
 cd class-pipeline
-bash setup.sh
+bash setup.sh --auto
 ```
 
-`setup.sh` 一键完成：依赖检查（缺 ffmpeg 自动 brew 安装）→ BlackHole 虚拟声卡 → 探测 Obsidian Vault → 写 `config.json` → 创建后台应用并注册 launchd 任务 → 弹出系统麦克风授权窗口 → 链接到 `~/.qoder/skills` 与 `~/.codex/skills`。重复运行安全。
+`setup.sh --auto` 一键完成：自动安装 Homebrew、ffmpeg 和 whisper-cpp → 自动下载 Whisper Turbo 模型 → 探测 Obsidian Vault → 写 `config.json` → 创建原生音频采集助手 → 注册 launchd 任务 → 运行健康检查 → 链接到 `~/.codex/skills/class-pipeline`。重复运行安全。
 
 仓库里附带一份 `config.example.json`，方便把这套 skill 迁移到新电脑或分享给别的 AI 环境时快速对照配置结构；实际运行仍以 `setup.sh` 生成的本地 `config.json` 为准。
 
-安装过程中系统会要求您做 4 件事（macOS 安全机制，无法再省）：
-
-1. 输入一次管理员密码（安装 BlackHole 驱动时）
-2. **重启一次 Mac**（BlackHole 驱动生效必需），重启后再跑一次 `bash setup.sh`
-3. 在弹出的「访问麦克风」窗口点一次【允许】
-4. 本地 Whisper Turbo 模型已下载到 `~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin`（setup 会检查）
-
-可选：想录到学生声音，在「音频 MIDI 设置」手动建一个多输出设备（扬声器+BlackHole，30 秒），或在会议 App 里把扬声器设为 BlackHole 2ch。
+安装过程中只需要处理 macOS 无法代办的一次性授权：麦克风、屏幕与系统音频录制、日历访问。setup 会自动安装本地 Whisper 运行时和模型；如果系统没有 Obsidian Vault，可用 `bash setup.sh --vault /绝对路径` 指定。
 
 卸载：`bash uninstall.sh`（保留录音数据与笔记）。
 
 ## 依赖
 
 - macOS（日历 / launchd / EventKit / osascript）
-- brew、ffmpeg、python3、swift（setup 会检查）
-- 本地 Whisper 运行时：`/opt/homebrew/bin/whisper-cli` 与 `~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin`
+- Homebrew、ffmpeg、whisper-cpp、python3、swift（setup 会自动安装缺失的 Homebrew/ffmpeg/whisper-cpp）
+- 本地 Whisper 运行时：setup 会自动安装 whisper-cpp，并写入实际 CLI 和模型路径
 - 日历事件命名：`{体系} Class-{学生名}`，如 `CIE Class-Sujal`
 
 ## 目录结构
 
 ```
-SKILL.md                  # AI 工作流指令（任何支持 skill 的 AI 可执行）
+SKILL.md                  # AI 工作流指令（首次触发会自动初始化）
 config.example.json       # 配置模板（分享/迁移时参考）
 config.json               # 运行时配置（setup.sh 生成，本地使用，不入库）
 setup.sh / uninstall.sh   # 安装 / 卸载
 scripts/
   preclass_scan.py        # 课前：日历扫描 → 备课骨架
   meeting_watcher.sh      # 课中：会议检测 + 录音 + 转写 + 反馈草稿素材准备（launchd 常驻）
-  setup_audio.sh          # BlackHole 安装/检查/激活/还原
-  create_multi_output.swift  # 创建 CoreAudio 多输出设备
+  healthcheck.sh          # 检查配置、后台任务、录音组件和本地转写
   transcribe_audio.py     # 本地 Whisper Turbo 转写（自动分片）
 ```
 
-录音与文字稿存放在 `~/class-pipeline-data/`，日志在其 `logs/` 子目录。只有 `postclass-context.json`、正式家长反馈、学生档案更新和教师教学优化复盘四项全部成功并通过验证后，才会删除对应 session 的 `audio.wav`，并在同目录写入 `audio_deleted.txt` 记录删除时间、路径和释放字节数；待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核。`transcript.txt` / `transcript.json` 会保留。本地 Whisper 只负责这一步的语音转写，不负责备课内容、课后反馈正文或教师复盘。文字稿现在会一律归档到 Vault 的 `上课记录/课堂文字稿/`，AI 所需素材也会一律写入 `上课记录/课后反馈草稿/`。日历临时不可用时，任务会标为“待AI识别学生”并保留到后续重试，不会再静默跳过。正式家长反馈、学生档案更新和教师教学优化仍由装了该 skill 的 AI 完成；在 Codex 中应配置周期任务来自动消费这批待处理素材。
+录音与文字稿存放在 `~/physics-class-pipeline-data/`，日志在其 `logs/` 子目录。只有 `postclass-context.json`、正式家长反馈、学生档案更新和教师教学优化复盘四项全部成功并通过验证后，才会删除对应 session 的 `audio.wav`；待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核。文字稿会一律归档到 Vault 的 `上课记录/课堂文字稿/`，AI 素材写入 `上课记录/课后反馈草稿/`。安装后可运行 `bash scripts/healthcheck.sh` 验证后台监听和转写依赖。
 
 开课和散会提醒同时使用通知横幅与 8 秒自动关闭的可见对话框，避免 macOS 静默抑制横幅时没有任何提示。可随时运行 `bash scripts/meeting_watcher.sh notify-test` 验证弹窗链路。
 
-音频设置中，`PhysicsClass Multi-Output` 应勾选实际听课设备（本机为 `Mac mini扬声器`）和 `BlackHole 2ch`。Pipeline 开课时切换到该复制设备，散会后会恢复开课前实际使用的输出设备。
+音频采集使用 macOS 原生 ScreenCaptureKit，同时捕获系统播放声和麦克风，不需要 BlackHole、Multi-Output 或手动切换会议 App 的扬声器设备。
 
 课程身份现在采用两阶段确认：录音开始时的匹配只算 provisional；如果附近有多节紧邻课程就不会提前锁学生。完整转写后，Pipeline 会用文字稿第一段有效课堂语音对应的实际时间重新做 final match，因此“第一节取消、第二节实际开课”不会再沿用第一节的早期身份。随后 `scripts/trigger_postclass_ai.sh` 事件式启动本机 Codex，先完整读取本节文字稿 + 当前学生档案 + 最近反馈（以及可用的上一节文字稿/本次备课），建立并验证 `postclass-context.json`，再依次生成家长反馈、更新档案并生成教学优化复盘。这不是定时轮询；每天 10:00 的 Codex 自动任务仅作为失败重试与次日备课入口。
 
@@ -80,7 +72,7 @@ scripts/
 
 - 改工作流或提示词时，优先更新 `SKILL.md` 与 `docs/feedback-spec.md`
 - 改自动化行为时，优先更新 `scripts/`
-- 换电脑时先复制仓库，再运行 `bash setup.sh`
+- 换电脑时先复制仓库，再运行 `bash setup.sh --auto`
 - 只想迁移配置时，对照 `config.example.json`，不要直接提交自己的 `config.json`
 
 

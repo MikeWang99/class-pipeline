@@ -19,20 +19,32 @@ description: 物理教学课前/课中/课后全链路自动化。课前定时�
   - `备课内容/`、`课堂文字稿/`、`课后反馈/`、`课后反馈草稿/`、`学生档案/`、`教学优化/`
 - **文件命名**：`YYYY-MM-DD {体系} Class-{学生}.md`（学生档案固定为 `{学生}.md`，累积更新）
 - **日历事件格式**：`{体系} Class-{学生名}`，如 `CIE Class-Sujal`、`AP Class-Eden`。体系取 `Class` 前文本，学生取连字符后文本。
-- 读取配置后再干活；`config.json` 不存在时提示用户先运行 `setup.sh`。
+- 读取配置后再干活；首次触发或 config.json 不存在时，必须自动执行 bash {skill_dir}/setup.sh --auto，不要只提示用户
+- 初始化结束后必须执行 bash {skill_dir}/scripts/healthcheck.sh；健康检查未通过时明确报告缺失项，不得宣称 Pipeline 已就绪
 - 所有脚本在 `scripts/` 下，用绝对路径调用。
 - **转写后端**：`scripts/transcribe_audio.py` 固定使用本地 whisper.cpp，默认模型为 `~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin`（多语言 Q5 量化版）；也可用 `WHISPER_MODEL` 指定其他本地模型，`TRANSCRIBE_LANGUAGE=zh`、`en` 或 `auto` 指定语言。不会读取 API key，也不会联网转写。对短时间内完全重复的 Whisper 循环片段会保留第一次、清理后续重复，并把未过滤原稿保存为 session 内的 `transcript_raw.json` 供诊断。
 - **系统声音采集**：课中使用 macOS 原生 ScreenCaptureKit，同时采集当前系统播放声音和当前麦克风输入，分别保存为 `system_audio.caf` 与 `microphone_audio.caf`，散会后合成为 `audio.wav`（左声道为系统声，右声道为麦克风）。不依赖 BlackHole、Multi-Output、HDMI 或固定的扬声器/麦克风名称。首次运行需要给 `PhysicsClassAudio` 一次“麦克风”和“屏幕与系统音频录制”权限。
+
+## 0.1 安装即用契约
+
+skill installer 复制完本目录后，当前 Skill 第一次被触发时必须自举完成运行时初始化：
+
+1. 运行 bash {skill_dir}/setup.sh --auto
+2. 让 setup 自动安装缺失的 Homebrew、ffmpeg 和 whisper-cpp，并下载默认 Whisper Turbo 模型
+3. 自动探测 Obsidian Vault，写入 config.json，创建笔记分区、录音目录和 launchd 后台任务
+4. 运行 bash {skill_dir}/scripts/healthcheck.sh，只有显示 READY 才开始依赖后台录音
+
+安装时允许用户只处理 macOS 无法代办的一次性授权：麦克风、屏幕与系统音频录制、日历访问。授权后 setup 必须可重复运行并修复未完成的步骤；不能把“已复制 SKILL.md”当成“已安装完成”。
 
 ## 1. 首次安装（闭环）
 
 用户说「安装/设置 physics-class-pipeline」时：
 
 ```bash
-bash {skill_dir}/setup.sh
+bash {skill_dir}/setup.sh --auto
 ```
 
-setup.sh 会自动完成：依赖检查（brew/ffmpeg/python3/swift）→ 编译并注册原生 `PhysicsClassAudio` 采集助手 → 探测 Obsidian Vault → 检查本地 Whisper Turbo 模型 → 创建后台应用 PhysicsClassWatcher/PhysicsClassScanner 并注册两个 launchd 任务（每日 10:00 课前扫描 + 常驻会议监听）→ 安装 skill 到 `~/.codex/skills`。首次开始录课时按 macOS 提示授予采集权限。全程打印每一步结果。卸载用 `uninstall.sh`。
+setup.sh 会自动完成：依赖检查与安装（Homebrew/ffmpeg/whisper-cpp/python3/swift）→ 自动下载本地 Whisper Turbo 模型 → 编译并注册原生 `PhysicsClassAudio` 采集助手 → 探测 Obsidian Vault → 写入 `config.json` → 创建后台应用 PhysicsClassWatcher/PhysicsClassScanner 并注册两个 launchd 任务（每日 10:00 课前扫描 + 常驻会议监听）→ 运行健康检查。首次运行只需按 macOS 提示授予采集和日历权限；全程打印每一步结果。卸载用 `uninstall.sh`。
 
 ## 2. 课前：备课内容生成
 

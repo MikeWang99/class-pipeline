@@ -16,7 +16,7 @@ for p in "$PLIST_SCAN" "$PLIST_WATCH"; do
 done
 
 echo "==> 移除 skill 链接"
-for dest in "$HOME/.qoder/skills/physics-class-pipeline" "$HOME/.codex/skills/physics-class-pipeline"; do
+for dest in "$HOME/.qoder/skills/physics-class-pipeline" "$HOME/.codex/skills/class-pipeline" "$HOME/.codex/skills/physics-class-pipeline"; do
   if [ -L "$dest" ]; then rm "$dest"; echo "  removed: $dest"; fi
 done
 

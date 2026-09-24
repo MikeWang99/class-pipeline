@@ -35,6 +35,10 @@ WHISPER_MODEL_CFG="$(cfg whisper_model "")"
 if [ -n "$WHISPER_MODEL_CFG" ]; then
   export WHISPER_MODEL="${WHISPER_MODEL_CFG/#\~/$HOME}"
 fi
+WHISPER_CLI_CFG="$(cfg whisper_cli "")"
+if [ -n "$WHISPER_CLI_CFG" ]; then
+  export WHISPER_CLI="$WHISPER_CLI_CFG"
+fi
 export TRANSCRIBE_LANGUAGE="$(cfg transcribe_language "auto")"
 RECORDING_BACKEND="$(cfg recording_backend "native_system_and_microphone")"
 NATIVE_CAPTURE_APP="$HOME/Applications/PhysicsClassAudio.app/Contents/MacOS/PhysicsClassAudio"
