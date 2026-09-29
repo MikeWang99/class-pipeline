@@ -15,6 +15,9 @@ description: 物理教学课前/课中/课后全链路自动化。课前定时�
   - `calendar_keyword`：日历事件识别关键词（默认 `Class`）
   - `scan_hour` / `scan_minute`：每日课前扫描时间（默认 10:00）
   - `recording_backend`：固定为 `native_system_and_microphone`，表示使用 macOS 原生系统声音与麦克风双路采集，不绑定设备名称。
+  - `max_recording_minutes`：单次课堂录音上限，默认且硬上限均为 150 分钟；即使会议窗口/标签页仍被误判为“开会中”，达到上限后也会停止且本次会议结束前不再重启。
+  - `min_free_disk_gb` / `critical_free_disk_gb`：默认 8 GB / 3 GB；低于启动阈值不开始新录音，录制中跌到危险阈值则提前停止并锁定本次会议。
+  - `capture_stall_seconds` / `capture_heartbeat_timeout_seconds`：运行中断流检测，默认 180 秒无新帧或 45 秒无 heartbeat 触发同 session 自动恢复。
 - **笔记根目录**：`{vault_path}/上课记录/`，下设四个子分区：
   - `备课内容/`、`课堂文字稿/`、`课后反馈/`、`课后反馈草稿/`、`学生档案/`、`教学优化/`
 - **文件命名**：`YYYY-MM-DD {体系} Class-{学生}.md`（学生档案固定为 `{学生}.md`，累积更新）
@@ -68,8 +71,8 @@ setup.sh 会自动完成：依赖检查与安装（Homebrew/ffmpeg/whisper-cpp/p
 launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 
 - **覆盖平台**：Zoom（zoom.us）、腾讯会议（wemeetapp/xmeet）、钉钉、飞书、Google Meet（Chrome/Safari 打开 meet.google.com 标签页）
-- **检测到开课**：启动 `PhysicsClassAudio`，分别捕获系统播放声和麦克风声；散会后合并成 `{recordings_dir}/sessions/{YYYY-MM-DD_HHMM}/audio.wav`。录音过程不检查 BlackHole、Multi-Output 或设备名称，任一原生采集通道未就绪时会保留诊断状态并阻止不可靠转写。
-- **检测到散会**（连续 45 秒无会议进程）：停止录音 → 写入 `audio_health.json` 检查文件是否为空，并对长录音写入 `transcription_preflight.json`，用本地 Turbo 抽样排除重复幻听。检查失败时保留音频、写明故障并跳过完整转写和反馈；健康时才使用本地 Whisper Turbo 转写 → 文字稿存 `transcript.txt` → **无论是否匹配到日历，都会先把文字稿归档到 Vault 的 `课堂文字稿/`** → 创建课后反馈待处理素材并交给当前 AI；只有正式家长反馈、学生档案更新和教师教学优化复盘都成功后才删除 `audio.wav` 及两份原始 `.caf` 通道（写入 `audio_deleted.txt` 删除记录），待身份识别、转写质量确认或 AI 生成的任务会保留原音频供复核
+- **检测到开课**：启动 `PhysicsClassAudio`，分别捕获系统播放声和麦克风声。单次 session 最多录 150 分钟；原生 helper 自己带硬计时器，watcher 也有第二层时长守卫。若 ScreenCaptureKit 运行中报错、helper heartbeat 停止或两路都长期无新 frame，watcher 会在**同一个 session**中切到新的 capture segment，散会后按顺序拼成一份 `audio.wav`。最多自动恢复 3 次，超过则标记不完整并停止自动课后链路。录音过程不依赖 BlackHole、Multi-Output 或固定设备名称。
+- **检测到散会**（连续 45 秒无会议状态）：停止录音 → 合并所有恢复 segment → 检查最终音频时长与墙钟时长。若明显缺段则写 `recording_incomplete`，即使仍可转写部分音频用于诊断，也**禁止自动家长反馈、学生档案更新和教师复盘，并强制保留原音频**。健康录音才继续完整转写与课后链路；只有正式家长反馈、学生档案更新和教师教学优化复盘都成功后才删除 `audio.wav` 及所有 `system_audio*.caf` / `microphone_audio*.caf` 原始 segment
 - **课程身份采用两阶段确认**：开课时只能做 provisional match；当同一时间窗存在多节紧邻课程时，不允许提前锁定任何学生。转写完成后，必须根据文字稿第一段有效课堂语音对应的实际时间重新做 transcript-aware final match，并写入 `calendar_match_final.txt`。正式反馈只能使用 final / confirmed identity，早期 `calendar_match.txt` 仅作审计线索，不能作为最终身份依据。若 final match 仍不唯一，保留待处理队列，禁止猜学生。
 
 用户无需任何手动操作。若用户说「开始上课/手动录音」，可直接运行 `bash {skill_dir}/scripts/meeting_watcher.sh once` 强制走一轮录音+转写。
@@ -115,7 +118,9 @@ launchd 常驻任务 `meeting_watcher.sh` 每 15 秒检测一次会议进程：
 | 现象 | 处理 |
 |---|---|
 | 录音文件无声/只有单方 | 先查看 session 的 `audio_health.json`、`audio_route.txt` 与 `system_audio_status.txt`，确认 `PhysicsClassAudio` 已获得“麦克风”和“屏幕与系统音频录制”权限。此类课程会自动保留诊断文件并跳过错误转写。 |
-| 录音时长明显短于实际课程 | 检查 `recording_started_at.txt`、`recording_stopped_at.txt` 与 `recording_incomplete`；先修复音频路由，再重新上课，不能拿不完整录音生成反馈 |
+| 录音时长明显短于实际课程 | 检查 `capture_segments.tsv`、各段 `system_audio_status*.txt`、`capture_restart_count.txt`、`recording_interrupted` 与 `recording_incomplete`。v2.4 会自动恢复运行中断流并拼接；最终仍不完整时会硬阻止反馈，不能拿残缺录音更新家长反馈/学生档案 |
+| 忘记关会议窗口/Meet 标签页 | 单次录音 150 分钟自动硬停，并写 `recording_limit_reached`；只要当前 meeting detector 仍判定会议存在，就保持 hold，不会 15 秒后重新开一份新录音 |
+| 磁盘空间不足 | 启动前低于默认 8 GB 会拒绝开始；录制中低于默认 3 GB 会写 `recording_disk_guard` 并提前停止，避免录满磁盘 |
 | 没检测到开会 | 运行 `bash scripts/meeting_watcher.sh once` 看检测日志；浏览器开 Meet 需在 Chrome/Safari 且标签页可见 |
 | 原生采集权限未通过 | 打开 系统设置→隐私与安全性→麦克风，以及“屏幕与系统音频录制”，把 `PhysicsClassAudio` 打开后重新测试 |
 | 转写失败 | 先看 `{recordings_dir}/logs/watcher.log`；确认 `config.json` 中的 `whisper_cli` 与 `~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin` 存在，或设置 `WHISPER_CLI` / `WHISPER_MODEL` 指向本地安装 |
