@@ -231,7 +231,15 @@ archive_transcript() {
     echo "calendar_matched: $matched"
     echo "transcript_source: $dir/transcript.txt"
     echo "audio_source_original: $dir/audio.wav"
-    echo "audio_retention_policy: delete_after_formal_feedback"
+    if [ -f "$dir/recording_incomplete" ]; then
+      echo "recording_completeness: incomplete"
+      echo "audio_retention_policy: retain_for_manual_review"
+    else
+      echo "recording_completeness: complete"
+      echo "audio_retention_policy: delete_after_formal_feedback"
+    fi
+    [ -f "$dir/recording_limit_reached" ] && echo "recording_limit_reached: true"
+    [ -f "$dir/capture_restart_count.txt" ] && echo "capture_restarts: $(cat "$dir/capture_restart_count.txt")"
     [ -f "$dir/platform.txt" ] && echo "meeting_platform: $(cat "$dir/platform.txt")"
     echo "---"
     echo
@@ -543,15 +551,11 @@ merge_native_audio() {
 finalize_session() {
   local dir="$1"
   [ -d "$dir" ] || return 1
-  if [ -f "$dir/audio_input_unhealthy" ] && [ ! -s "$dir/system_audio.caf" ] && [ ! -s "$dir/microphone_audio.caf" ]; then
-    log "native recording already marked unavailable; leaving diagnostic session untouched (session=$dir)"
-    return 1
-  fi
   if [ -f "$dir/native_audio_required" ] && [ ! -f "$dir/audio.wav" ]; then
     merge_native_audio "$dir" || return 1
   fi
   printf '%s %s\n' "$(date '+%s')" "$(date '+%Y-%m-%d %H:%M:%S %z')" > "$dir/recording_stopped_at.txt"
-  check_recording_duration "$dir"
+  check_recording_duration "$dir" || true
   check_audio_capture "$dir" || true
   check_transcription_preflight "$dir" || true
   log "RECORDING finalized (session=$dir)"
@@ -560,16 +564,24 @@ finalize_session() {
 }
 
 stop_recording() {
-  [ -z "$FFPID" ] && return
-  kill -TERM "$FFPID" 2>/dev/null
-  wait "$FFPID" 2>/dev/null
-  finalize_session "$SESSION" || true
+  local dir="$SESSION"
+  [ -n "$dir" ] || return 0
+  if [ -n "$FFPID" ]; then
+    kill -TERM "$FFPID" 2>/dev/null || true
+    wait "$FFPID" 2>/dev/null || true
+  fi
+  rm -f "$dir/active_capture.pid"
   FFPID=""
+  finalize_session "$dir" || true
   SESSION=""
   SYSTEM_AUDIO_FILE=""
   MICROPHONE_AUDIO_FILE=""
   NATIVE_STATUS_FILE=""
   MATCH_RETRY_STAMP=0
+  SEGMENT_INDEX=0
+  RESTART_COUNT=0
+  LAST_CAPTURE_FRAMES=0
+  LAST_CAPTURE_PROGRESS_EPOCH=0
 }
 
 check_recording_duration() {
@@ -580,11 +592,40 @@ check_recording_duration() {
   stop_epoch=$(awk 'NR==1 {print $1}' "$dir/recording_stopped_at.txt" 2>/dev/null || date '+%s')
   audio_seconds=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$dir/audio.wav" 2>/dev/null || echo 0)
   wall_seconds=$((stop_epoch - start_epoch))
-  if [ "$wall_seconds" -gt 120 ] && awk "BEGIN {exit !($audio_seconds < $wall_seconds * 0.75)}"; then
+  if [ "$wall_seconds" -gt 120 ] && awk -v a="$audio_seconds" -v w="$wall_seconds" -v ratio="$RECORDING_MIN_COMPLETENESS_RATIO" -v gap="$RECORDING_GAP_TOLERANCE_SECONDS" 'BEGIN {exit !((w-a) > gap && a < w*ratio)}'; then
     : > "$dir/recording_incomplete"
-    log "WARNING: recorded audio is shorter than meeting runtime (audio=${audio_seconds}s wall=${wall_seconds}s, session=$dir)"
-    notify "recording-incomplete" "录音时长明显短于会议时长，已暂停课后反馈并保留音频供检查"
+    : > "$dir/retain_audio"
+    log "WARNING: recorded audio is materially shorter than meeting runtime (audio=${audio_seconds}s wall=${wall_seconds}s, ratio_min=$RECORDING_MIN_COMPLETENESS_RATIO gap_tolerance=$RECORDING_GAP_TOLERANCE_SECONDS, session=$dir)"
+    notify "recording-incomplete" "录音时长明显短于课堂时长，已禁止自动课后反馈并保留音频供检查"
+    return 1
   fi
+  return 0
+}
+
+enforce_recording_guards() {
+  local age free
+  [ -n "$SESSION" ] || return 0
+  age=$(recording_age_seconds "$SESSION")
+  if [ "$age" -ge "$MAX_RECORDING_SECONDS" ]; then
+    : > "$SESSION/recording_limit_reached"
+    HOLD_UNTIL_MEETING_END=1
+    log "recording hard limit reached after ${age}s (session=$SESSION)"
+    notify "recording-limit" "本次录音已达到 2.5 小时硬上限，已自动停止；本次会议结束前不会再次录音"
+    stop_recording
+    return 1
+  fi
+  free=$(free_disk_mb)
+  if [ -n "$free" ] && [ "$free" -lt "$CRITICAL_FREE_DISK_MB" ]; then
+    : > "$SESSION/recording_disk_guard"
+    : > "$SESSION/recording_incomplete"
+    : > "$SESSION/retain_audio"
+    HOLD_UNTIL_MEETING_END=1
+    log "CRITICAL: recording stopped for low disk space (free=${free}MB threshold=${CRITICAL_FREE_DISK_MB}MB session=$SESSION)"
+    notify "disk-critical" "磁盘空间进入危险区，录音已提前停止并锁定本次会议，防止占满硬盘"
+    stop_recording
+    return 1
+  fi
+  return 0
 }
 
 check_audio_capture() {
@@ -748,26 +789,49 @@ if [ "${1:-}" = "notify-test" ]; then
 fi
 
 if [ "${1:-}" = "once" ]; then
-  echo "Manual recording — press Ctrl-C when class ends."
+  echo "Manual recording — hard stop at 2.5 hours; Ctrl-C can stop earlier."
   start_recording "manual" || exit 1
   trap 'stop_recording; exit 0' INT TERM
-  while true; do sleep 5; done
+  while true; do
+    sleep 5
+    [ "$HOLD_UNTIL_MEETING_END" -eq 1 ] && exit 0
+    if [ -n "$FFPID" ] && ! kill -0 "$FFPID" 2>/dev/null; then
+      if [ "$(recording_age_seconds "$SESSION")" -ge "$MAX_RECORDING_SECONDS" ]; then
+        : > "$SESSION/recording_limit_reached"
+        HOLD_UNTIL_MEETING_END=1
+        stop_recording
+        exit 0
+      fi
+      recover_capture "manual" "unexpected process exit" || true
+    elif [ -n "$FFPID" ] && ! check_capture_runtime_health; then
+      recover_capture "manual" "stale heartbeat/no frame progress" || true
+    elif [ -n "$SESSION" ] && [ -z "$FFPID" ]; then
+      resume_capture_segment "manual" || true
+    fi
+    enforce_recording_guards || {
+      [ "$HOLD_UNTIL_MEETING_END" -eq 1 ] && exit 0
+    }
+  done
 fi
 
 # daemon loop
 log "watcher started (pid $$)"
-# Crash recovery for native sessions left by a previous watcher instance.
+# Only finalize clearly old orphaned sessions at startup. A recent interrupted
+# session may belong to a class still in progress and must not be prematurely
+# transcribed as a complete lesson.
+now_epoch=$(date +%s)
 for marker in "$RECORD_DIR"/sessions/*/native_audio_required; do
   [ -f "$marker" ] || continue
-  dir="$(dirname "$marker")"
-  [ -f "$dir/audio_input_unhealthy" ] && continue
-  if [ ! -f "$dir/audio.wav" ] && ! pgrep -qf "$dir/system_audio.caf"; then
-    log "adopting orphaned native recording: $dir"
+  dir=$(dirname "$marker")
+  [ -f "$dir/audio.wav" ] && continue
+  start_epoch=$(recording_start_epoch "$dir")
+  [ "$start_epoch" -gt 0 ] || continue
+  if [ $((now_epoch - start_epoch)) -gt $((MAX_RECORDING_SECONDS + 600)) ] && ! pgrep -qf "$dir/system_audio"; then
+    log "finalizing stale orphaned native recording: $dir"
     finalize_session "$dir" || true
   fi
 done
-# Compatibility recovery: transcribe old BlackHole recordings left by a
-# previous version. New recordings never use this path.
+# Compatibility recovery: transcribe old completed audio.wav files.
 for f in "$RECORD_DIR"/sessions/*/audio.wav; do
   [ -f "$f" ] || continue
   if ! pgrep -qf "ffmpeg.*$(basename "$(dirname "$f")")"; then
@@ -781,26 +845,38 @@ while true; do
   platform=$(meeting_running) && in_meeting=1 || in_meeting=0
   if [ "$in_meeting" = 1 ]; then
     miss=0
-    if [ -n "$FFPID" ] && ! kill -0 "$FFPID" 2>/dev/null; then
-      log "ERROR: recording process exited unexpectedly (pid=$FFPID, session=$SESSION)"
-      notify "recording-error" "录音进程意外中断，已保留当前片段并尝试恢复"
-      finalize_session "$SESSION" || true
-      FFPID=""
-      SESSION=""
-    fi
-    [ -z "$FFPID" ] && start_recording "$platform"
-    [ -n "$FFPID" ] && retry_course_match
-  else
-    if [ -n "$FFPID" ]; then
-      miss=$((miss+1))
-      if [ "$miss" -ge "$MISS_LIMIT" ]; then stop_recording; fi
+    if [ "$HOLD_UNTIL_MEETING_END" -eq 1 ]; then
+      :
+    elif [ -n "$SESSION" ]; then
+      if [ -n "$FFPID" ] && ! kill -0 "$FFPID" 2>/dev/null; then
+        if [ "$(recording_age_seconds "$SESSION")" -ge "$MAX_RECORDING_SECONDS" ]; then
+          : > "$SESSION/recording_limit_reached"
+          HOLD_UNTIL_MEETING_END=1
+          stop_recording
+        else
+          recover_capture "$platform" "unexpected process exit" || true
+        fi
+      elif [ -n "$FFPID" ] && ! check_capture_runtime_health; then
+        recover_capture "$platform" "stale heartbeat/no frame progress" || true
+      elif [ -z "$FFPID" ]; then
+        resume_capture_segment "$platform" || true
+      fi
+      [ -n "$FFPID" ] && retry_course_match
+      enforce_recording_guards || true
     else
-      # meeting gone and we hold no recording — finalize any orphaned one
+      start_recording "$platform" || true
+    fi
+  else
+    miss=$((miss+1))
+    if [ "$miss" -ge "$MISS_LIMIT" ]; then
+      [ -n "$SESSION" ] && stop_recording
+      HOLD_UNTIL_MEETING_END=0
+      miss=0
       for marker in "$RECORD_DIR"/sessions/*/native_audio_required; do
         [ -f "$marker" ] || continue
-        dir="$(dirname "$marker")"
-        [ -f "$dir/audio_input_unhealthy" ] && continue
-        if [ ! -f "$dir/audio.wav" ] && ! pgrep -qf "$dir/system_audio.caf"; then
+        dir=$(dirname "$marker")
+        [ -f "$dir/audio.wav" ] && continue
+        if ! pgrep -qf "$dir/system_audio"; then
           log "meeting over, finalizing orphaned native recording: $dir"
           finalize_session "$dir" || true
         fi
