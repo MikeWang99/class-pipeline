@@ -86,6 +86,10 @@ case "$AUDIO_CAPTURE_STATUS" in
   system_audio_missing|microphone_audio_missing) TRANSCRIPT_QUALITY="audio_capture_degraded_${AUDIO_CAPTURE_STATUS}"; MATERIAL_STATUS="待人工确认录音" ;;
   no_capturable_audio) TRANSCRIPT_QUALITY="audio_capture_failed"; MATERIAL_STATUS="待人工确认录音" ;;
 esac
+if [ -f "$SESSION_DIR/recording_incomplete" ]; then
+  TRANSCRIPT_QUALITY="recording_incomplete"
+  MATERIAL_STATUS="待人工确认录音"
+fi
 
 cat > "$OUTFILE" <<EOF
 ---
