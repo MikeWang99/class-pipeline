@@ -64,6 +64,32 @@ VAULT_PATH="$(expand_home "$(cfg vault_path "")")"
 RECORD_DIR="$(expand_home "$(cfg recordings_dir "$RECORD_DIR_DEFAULT")")"
 WHISPER_CLI="$(expand_home "$(cfg whisper_cli "")")"
 WHISPER_MODEL="$(expand_home "$(cfg whisper_model "$HOME/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin")")"
+CURRENT_VERSION="$(tr -d '[:space:]' < "$SKILL_DIR/VERSION" 2>/dev/null || echo unknown)"
+CONFIG_VERSION="$(cfg skill_version unknown)"
+MAX_RECORDING_MINUTES="$(cfg max_recording_minutes 150)"
+MIN_FREE_DISK_GB="$(cfg min_free_disk_gb 8)"
+CAPTURE_BINARY="$HOME/Applications/PhysicsClassAudio.app/Contents/MacOS/PhysicsClassAudio"
+CAPTURE_SOURCE="$SKILL_DIR/scripts/capture_native_audio.swift"
+
+if [ "$CONFIG_VERSION" = "$CURRENT_VERSION" ]; then
+  pass "Skill/config 版本一致：$CURRENT_VERSION"
+else
+  fail "Skill 已升级到 $CURRENT_VERSION，但 config.json 仍是 $CONFIG_VERSION；请运行 bash $SKILL_DIR/setup.sh --repair"
+fi
+
+if python3 - "$MAX_RECORDING_MINUTES" <<'PYEOF'
+import sys
+try:
+    value = float(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if 0 < value <= 150 else 1)
+PYEOF
+then
+  pass "单次录音硬上限：${MAX_RECORDING_MINUTES} 分钟（不会超过 150 分钟）"
+else
+  fail "max_recording_minutes 必须在 1–150 之间"
+fi
 
 [ -n "$VAULT_PATH" ] && [ -d "$VAULT_PATH" ] \
   && pass "Obsidian Vault: $VAULT_PATH" \
@@ -83,10 +109,30 @@ else
   fail "录音目录未就绪：$RECORD_DIR"
 fi
 
-if [ -x "$HOME/Applications/PhysicsClassAudio.app/Contents/MacOS/PhysicsClassAudio" ]; then
-  pass "原生音频采集组件已安装"
+if [ -x "$CAPTURE_BINARY" ]; then
+  if [ "$CAPTURE_SOURCE" -nt "$CAPTURE_BINARY" ]; then
+    fail "PhysicsClassAudio 是旧二进制；请运行 bash $SKILL_DIR/setup.sh --repair 重新编译"
+  else
+    pass "原生音频采集组件已安装且为当前版本"
+  fi
 else
   fail "PhysicsClassAudio 未安装"
+fi
+
+if [ -d "$RECORD_DIR" ]; then
+  FREE_KB=$(df -Pk "$RECORD_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
+  if [ -n "$FREE_KB" ]; then
+    FREE_GB=$(python3 -c 'import sys; print(round(int(sys.argv[1])/1024/1024,1))' "$FREE_KB")
+    if python3 - "$FREE_GB" "$MIN_FREE_DISK_GB" <<'PYEOF'
+import sys
+raise SystemExit(0 if float(sys.argv[1]) >= float(sys.argv[2]) else 1)
+PYEOF
+    then
+      pass "录音磁盘余量：${FREE_GB} GB"
+    else
+      warn "录音磁盘余量仅 ${FREE_GB} GB；低于建议启动阈值 ${MIN_FREE_DISK_GB} GB"
+    fi
+  fi
 fi
 
 if [ -n "$WHISPER_CLI" ] && [ -x "$WHISPER_CLI" ]; then
