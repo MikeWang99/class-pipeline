@@ -46,7 +46,14 @@ prepare_material_identity(){
 
 cleanup_recording(){
   local session_dir="$1" file bytes failed=0 marker_tmp
-  local files=("$session_dir/audio.wav" "$session_dir/system_audio.caf" "$session_dir/microphone_audio.caf")
+  local files=("$session_dir/audio.wav")
+  [ -f "$session_dir/recording_incomplete" ] && {
+    log "cleanup withheld for incomplete recording: $session_dir"
+    return 1
+  }
+  for file in "$session_dir"/system_audio*.caf "$session_dir"/microphone_audio*.caf; do
+    [ -e "$file" ] && files+=("$file")
+  done
   marker_tmp="$session_dir/.audio_deleted.txt.tmp"; : > "$marker_tmp"
   printf 'deleted_at: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" >> "$marker_tmp"
   printf 'reason: context, formal feedback, profile update, and teacher review validated\n' >> "$marker_tmp"
@@ -61,6 +68,10 @@ cleanup_recording(){
 worker(){
   local session_dir="$1" material_file="$2"
   local lock_file="$session_dir/.ai_trigger.pid" prompt rc
+  if [ -f "$session_dir/recording_incomplete" ]; then
+    log "AI trigger withheld: recording is incomplete (session=$session_dir)"
+    return 0
+  fi
   local profile_before_path profile_before_hash profile_after_path profile_after_hash expected_student
   trap "unlink '$lock_file' 2>/dev/null || true" EXIT
   prepare_material_identity "$session_dir" "$material_file"; case "$?" in 0) material_file="$PREPARED_MATERIAL" ;; 2|3) return 0 ;; *) return 1 ;; esac
@@ -106,6 +117,10 @@ if [ "$#" -ne 2 ]; then echo "Usage: trigger_postclass_ai.sh <session_dir> <mate
 SESSION_DIR="$1"; MATERIAL_FILE="$2"; LOCK_FILE="$SESSION_DIR/.ai_trigger.pid"
 [ -d "$SESSION_DIR" ] || { log "AI trigger rejected; no session: $SESSION_DIR"; exit 1; }
 [ -f "$MATERIAL_FILE" ] || { log "AI trigger rejected; no material: $MATERIAL_FILE"; exit 1; }
+if [ -f "$SESSION_DIR/recording_incomplete" ]; then
+  log "AI trigger withheld: recording is incomplete (session=$SESSION_DIR)"
+  exit 0
+fi
 if has_complete_outputs "$SESSION_DIR"; then cleanup_recording "$SESSION_DIR" || true; log "AI trigger skipped; already fully validated: $SESSION_DIR"; exit 0; fi
 prepare_material_identity "$SESSION_DIR" "$MATERIAL_FILE"; case "$?" in 0) MATERIAL_FILE="$PREPARED_MATERIAL" ;; 2|3) exit 0 ;; *) exit 1 ;; esac
 if [ -f "$LOCK_FILE" ]; then existing_pid="$(cat "$LOCK_FILE" 2>/dev/null || true)"; if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then log "AI trigger skipped; worker already running: session=$SESSION_DIR pid=$existing_pid"; exit 0; fi; rm -f "$LOCK_FILE"; fi
