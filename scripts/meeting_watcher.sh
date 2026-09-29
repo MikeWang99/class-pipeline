@@ -41,6 +41,24 @@ if [ -n "$WHISPER_CLI_CFG" ]; then
 fi
 export TRANSCRIBE_LANGUAGE="$(cfg transcribe_language "auto")"
 RECORDING_BACKEND="$(cfg recording_backend "native_system_and_microphone")"
+MAX_RECORDING_SECONDS="$(python3 -c 'import sys
+try: m=float(sys.argv[1])
+except Exception: m=150
+m=max(1,min(m,150))
+print(int(m*60))' "$(cfg max_recording_minutes "150")")"
+START_MIN_FREE_DISK_MB="$(python3 -c 'import sys
+try: g=float(sys.argv[1])
+except Exception: g=8
+print(max(1024,int(g*1024)))' "$(cfg min_free_disk_gb "8")")"
+CRITICAL_FREE_DISK_MB="$(python3 -c 'import sys
+try: g=float(sys.argv[1])
+except Exception: g=3
+print(max(512,int(g*1024)))' "$(cfg critical_free_disk_gb "3")")"
+CAPTURE_STALL_SECONDS="$(cfg capture_stall_seconds "180")"
+HEARTBEAT_TIMEOUT_SECONDS="$(cfg capture_heartbeat_timeout_seconds "45")"
+MAX_CAPTURE_RESTARTS="$(cfg max_capture_restarts "3")"
+RECORDING_MIN_COMPLETENESS_RATIO="$(cfg recording_min_completeness_ratio "0.97")"
+RECORDING_GAP_TOLERANCE_SECONDS="$(cfg recording_gap_tolerance_seconds "60")"
 NATIVE_CAPTURE_APP="$HOME/Applications/PhysicsClassAudio.app/Contents/MacOS/PhysicsClassAudio"
 LOG_DIR="$RECORD_DIR/logs"
 mkdir -p "$RECORD_DIR/sessions" "$LOG_DIR"
@@ -131,6 +149,11 @@ MICROPHONE_AUDIO_FILE=""
 NATIVE_STATUS_FILE=""
 NOTIFY_STAMP=""
 MATCH_RETRY_STAMP=0
+SEGMENT_INDEX=0
+RESTART_COUNT=0
+LAST_CAPTURE_FRAMES=0
+LAST_CAPTURE_PROGRESS_EPOCH=0
+HOLD_UNTIL_MEETING_END=0
 
 lock_course_match() {
   local dir="$1"
@@ -218,47 +241,73 @@ archive_transcript() {
   printf '%s\n' "$archive_file"
 }
 
-start_recording() {
-  local platform="$1"
-  # A native helper has one stable app identity so macOS TCC permissions remain
-  # attached to the capture process instead of changing with each shell call.
-  local existing
-  existing=$(pgrep -f "$RECORD_DIR/sessions/.*/system_audio.caf" | head -1 || true)
-  if [ -n "$existing" ]; then
-    log "existing native recording (pid $existing) found, adopting instead of duplicate start"
-    FFPID="$existing"
-    SESSION=$(ps -o command= -p "$existing" | grep -o "$RECORD_DIR/sessions/[^ ]*" | head -1 | cut -d' ' -f1 | xargs dirname)
-    MATCH_RETRY_STAMP=0
-    lock_course_match "$SESSION" || true
-    return 0
-  fi
-  if [ ! -x "$NATIVE_CAPTURE_APP" ]; then
-    log "ERROR: native audio capture app is missing: $NATIVE_CAPTURE_APP"
-    notify_throttled "no-input" "检测到开会，但原生录音组件未安装；请运行一次 setup.sh 完成录音组件安装"
+free_disk_mb() {
+  df -Pk "$RECORD_DIR" 2>/dev/null | awk 'NR==2 {print int($4/1024)}'
+}
+
+recording_start_epoch() {
+  local dir="$1"
+  awk 'NR==1 {print $1}' "$dir/recording_started_at.txt" 2>/dev/null || echo 0
+}
+
+recording_age_seconds() {
+  local dir="$1" start now
+  start=$(recording_start_epoch "$dir")
+  now=$(date +%s)
+  if [ "$start" -gt 0 ]; then echo $((now - start)); else echo 0; fi
+}
+
+has_start_disk_space() {
+  local free
+  free=$(free_disk_mb)
+  [ -n "$free" ] || return 0
+  if [ "$free" -lt "$START_MIN_FREE_DISK_MB" ]; then
+    log "WARNING: refusing to start recording with only ${free}MB free (minimum=${START_MIN_FREE_DISK_MB}MB)"
+    notify_throttled "disk-low" "磁盘剩余空间不足，暂未开始录音；请先释放空间"
     return 1
   fi
-  SESSION="$RECORD_DIR/sessions/$(date '+%Y-%m-%d_%H%M%S')"
-  MATCH_RETRY_STAMP=0
-  mkdir -p "$SESSION"
-  echo "$platform" > "$SESSION/platform.txt"
-  : > "$SESSION/native_audio_required"
-  SYSTEM_AUDIO_FILE="$SESSION/system_audio.caf"
-  MICROPHONE_AUDIO_FILE="$SESSION/microphone_audio.caf"
-  NATIVE_STATUS_FILE="$SESSION/system_audio_status.txt"
-  printf '%s %s\n' "$(date '+%s')" "$(date '+%Y-%m-%d %H:%M:%S %z')" > "$SESSION/recording_started_at.txt"
-  "$NATIVE_CAPTURE_APP" "$SYSTEM_AUDIO_FILE" "$MICROPHONE_AUDIO_FILE" "$NATIVE_STATUS_FILE" >> "$LOG" 2>&1 &
-  FFPID=$!
+  return 0
+}
+
+set_segment_paths() {
+  local suffix=""
+  if [ "$SEGMENT_INDEX" -gt 1 ]; then
+    suffix=$(printf '.part%02d' "$SEGMENT_INDEX")
+  fi
+  SYSTEM_AUDIO_FILE="$SESSION/system_audio${suffix}.caf"
+  MICROPHONE_AUDIO_FILE="$SESSION/microphone_audio${suffix}.caf"
+  NATIVE_STATUS_FILE="$SESSION/system_audio_status${suffix}.txt"
+}
+
+capture_status_value() {
+  local file="$1" key="$2"
+  awk -F= -v key="$key" '$1 == key {print $2; exit}' "$file" 2>/dev/null || true
+}
+
+write_active_capture_state() {
   {
-    echo "recording_backend: $RECORDING_BACKEND"
-    echo "system_audio_source: macOS ScreenCaptureKit system audio stream"
-    echo "microphone_source: macOS ScreenCaptureKit microphone stream"
-    echo "system_audio_file: $SYSTEM_AUDIO_FILE"
-    echo "microphone_audio_file: $MICROPHONE_AUDIO_FILE"
-    echo "native_capture_app: $NATIVE_CAPTURE_APP"
-    echo "audio_format: stereo WAV after merge (left=system, right=microphone)"
-  } > "$SESSION/audio_route.txt"
-  local ready=0
-  for _ in $(seq 1 20); do
+    echo "pid=$FFPID"
+    echo "segment_index=$SEGMENT_INDEX"
+    echo "system_audio_file=$SYSTEM_AUDIO_FILE"
+    echo "microphone_audio_file=$MICROPHONE_AUDIO_FILE"
+    echo "status_file=$NATIVE_STATUS_FILE"
+  } > "$SESSION/active_capture.state"
+  printf '%s\n' "$FFPID" > "$SESSION/active_capture.pid"
+}
+
+launch_capture_segment() {
+  local platform="$1" ready=0 remaining age sys_frames mic_frames
+  [ -n "$SESSION" ] || return 1
+  age=$(recording_age_seconds "$SESSION")
+  remaining=$((MAX_RECORDING_SECONDS - age))
+  [ "$remaining" -gt 0 ] || return 2
+  set_segment_paths
+  rm -f "$NATIVE_STATUS_FILE"
+  "$NATIVE_CAPTURE_APP" "$SYSTEM_AUDIO_FILE" "$MICROPHONE_AUDIO_FILE" "$NATIVE_STATUS_FILE" "$remaining" >> "$LOG" 2>&1 &
+  FFPID=$!
+  write_active_capture_state
+
+  for _ in $(seq 1 24); do
     if [ -s "$NATIVE_STATUS_FILE" ]; then
       if grep -q '^ready$' "$NATIVE_STATUS_FILE"; then ready=1; break; fi
       if grep -q '^error:' "$NATIVE_STATUS_FILE"; then break; fi
@@ -266,34 +315,225 @@ start_recording() {
     sleep 0.25
   done
   if [ "$ready" -ne 1 ]; then
-    log "ERROR: native audio capture did not become ready (session=$SESSION, status=$(cat "$NATIVE_STATUS_FILE" 2>/dev/null || echo missing))"
-    : > "$SESSION/audio_input_unhealthy"
-    notify_throttled "no-input" "检测到开会，但系统声音或麦克风原生采集未就绪；已阻止生成不可靠文字稿"
+    log "ERROR: native capture segment did not become ready (session=$SESSION segment=$SEGMENT_INDEX status=$(cat "$NATIVE_STATUS_FILE" 2>/dev/null || echo missing))"
+    notify_throttled "no-input" "检测到开会，但原生录音流未就绪；正在自动重试"
     kill -TERM "$FFPID" 2>/dev/null || true
     wait "$FFPID" 2>/dev/null || true
+    rm -f "$SESSION/active_capture.pid"
     FFPID=""
     return 1
   fi
-  log "RECORDING started (pid $FFPID, platform=$platform, session=$SESSION, backend=$RECORDING_BACKEND)"
-  notify "recording" "检测到开课，录音已开始"
-  # Lock the course while calendar/prep metadata is available. Transcription can
-  # take several minutes, so relying only on a post-class lookup is fragile.
+
+  printf '%s\t%s\t%s\t%s\n' "$SEGMENT_INDEX" "$SYSTEM_AUDIO_FILE" "$MICROPHONE_AUDIO_FILE" "$NATIVE_STATUS_FILE" >> "$SESSION/capture_segments.tsv"
+  sys_frames=$(capture_status_value "$NATIVE_STATUS_FILE" system_frames)
+  mic_frames=$(capture_status_value "$NATIVE_STATUS_FILE" microphone_frames)
+  LAST_CAPTURE_FRAMES=$(( ${sys_frames:-0} + ${mic_frames:-0} ))
+  LAST_CAPTURE_PROGRESS_EPOCH=$(date +%s)
+  write_active_capture_state
+  log "RECORDING segment started (pid=$FFPID platform=$platform session=$SESSION segment=$SEGMENT_INDEX remaining=${remaining}s)"
+  if [ "$SEGMENT_INDEX" -eq 1 ]; then
+    notify "recording" "检测到开课，录音已开始（单次最多 2.5 小时）"
+  else
+    notify "recording-recovered" "录音流中断后已自动恢复，仍在同一节课中继续录制"
+  fi
+  return 0
+}
+
+adopt_existing_capture() {
+  local pidfile pid dir state existing command
+  for pidfile in "$RECORD_DIR"/sessions/*/active_capture.pid; do
+    [ -f "$pidfile" ] || continue
+    pid=$(cat "$pidfile" 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      dir=$(dirname "$pidfile")
+      SESSION="$dir"
+      FFPID="$pid"
+      state="$dir/active_capture.state"
+      SEGMENT_INDEX=$(awk -F= '$1=="segment_index"{print $2}' "$state" 2>/dev/null || echo 1)
+      SYSTEM_AUDIO_FILE=$(awk -F= '$1=="system_audio_file"{sub(/^[^=]*=/,"");print}' "$state" 2>/dev/null || true)
+      MICROPHONE_AUDIO_FILE=$(awk -F= '$1=="microphone_audio_file"{sub(/^[^=]*=/,"");print}' "$state" 2>/dev/null || true)
+      NATIVE_STATUS_FILE=$(awk -F= '$1=="status_file"{sub(/^[^=]*=/,"");print}' "$state" 2>/dev/null || true)
+      RESTART_COUNT=$(cat "$dir/capture_restart_count.txt" 2>/dev/null || echo 0)
+      LAST_CAPTURE_FRAMES=0
+      LAST_CAPTURE_PROGRESS_EPOCH=$(date +%s)
+      MATCH_RETRY_STAMP=0
+      log "adopted existing native recording (pid=$FFPID session=$SESSION segment=$SEGMENT_INDEX)"
+      lock_course_match "$SESSION" || true
+      return 0
+    fi
+  done
+
+  existing=$(pgrep -f "$RECORD_DIR/sessions/.*/system_audio.caf" | head -1 || true)
+  if [ -n "$existing" ]; then
+    command=$(ps -o command= -p "$existing" 2>/dev/null || true)
+    SYSTEM_AUDIO_FILE=$(printf '%s\n' "$command" | grep -o "$RECORD_DIR/sessions/[^ ]*/system_audio.caf" | head -1 || true)
+    if [ -n "$SYSTEM_AUDIO_FILE" ]; then
+      SESSION=$(dirname "$SYSTEM_AUDIO_FILE")
+      FFPID="$existing"
+      MICROPHONE_AUDIO_FILE="$SESSION/microphone_audio.caf"
+      NATIVE_STATUS_FILE="$SESSION/system_audio_status.txt"
+      SEGMENT_INDEX=1
+      LAST_CAPTURE_PROGRESS_EPOCH=$(date +%s)
+      log "adopted legacy native recording (pid=$FFPID session=$SESSION)"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+start_recording() {
+  local platform="$1"
+  adopt_existing_capture && return 0
+  [ -x "$NATIVE_CAPTURE_APP" ] || {
+    log "ERROR: native audio capture app is missing: $NATIVE_CAPTURE_APP"
+    notify_throttled "no-input" "检测到开会，但原生录音组件未安装；请运行一次 setup.sh --repair"
+    return 1
+  }
+  has_start_disk_space || return 1
+
+  SESSION="$RECORD_DIR/sessions/$(date '+%Y-%m-%d_%H%M%S')"
+  mkdir -p "$SESSION"
+  echo "$platform" > "$SESSION/platform.txt"
+  : > "$SESSION/native_audio_required"
+  printf '%s %s\n' "$(date '+%s')" "$(date '+%Y-%m-%d %H:%M:%S %z')" > "$SESSION/recording_started_at.txt"
+  SEGMENT_INDEX=1
+  RESTART_COUNT=0
+  printf '0\n' > "$SESSION/capture_restart_count.txt"
+  : > "$SESSION/capture_segments.tsv"
+  {
+    echo "recording_backend: $RECORDING_BACKEND"
+    echo "system_audio_source: macOS ScreenCaptureKit system audio stream"
+    echo "microphone_source: macOS ScreenCaptureKit microphone stream"
+    echo "capture_segments: $SESSION/capture_segments.tsv"
+    echo "hard_recording_limit_seconds: $MAX_RECORDING_SECONDS"
+    echo "audio_format: stereo WAV after merge (left=system, right=microphone)"
+  } > "$SESSION/audio_route.txt"
+
+  if ! launch_capture_segment "$platform"; then
+    : > "$SESSION/recording_interrupted"
+    return 1
+  fi
   lock_course_match "$SESSION" || true
   MATCH_RETRY_STAMP=$(date +%s)
+  return 0
+}
+
+resume_capture_segment() {
+  local platform="$1"
+  [ -n "$SESSION" ] || return 1
+  RESTART_COUNT=$((RESTART_COUNT + 1))
+  printf '%s\n' "$RESTART_COUNT" > "$SESSION/capture_restart_count.txt"
+  : > "$SESSION/recording_interrupted"
+  if [ "$RESTART_COUNT" -gt "$MAX_CAPTURE_RESTARTS" ]; then
+    : > "$SESSION/recording_incomplete"
+    : > "$SESSION/recording_recovery_exhausted"
+    HOLD_UNTIL_MEETING_END=1
+    log "ERROR: capture recovery exhausted (session=$SESSION restarts=$RESTART_COUNT)"
+    notify "recording-error" "录音连续中断，自动恢复次数已用完；已停止本节课录音并保留现有片段"
+    stop_recording
+    return 1
+  fi
+  SEGMENT_INDEX=$((SEGMENT_INDEX + 1))
+  launch_capture_segment "$platform"
+}
+
+check_capture_runtime_health() {
+  local now heartbeat sys_frames mic_frames total
+  [ -n "$FFPID" ] || return 1
+  [ -s "$NATIVE_STATUS_FILE" ] || return 0
+  if grep -q '^error:' "$NATIVE_STATUS_FILE"; then
+    log "WARNING: native runtime error reported (session=$SESSION segment=$SEGMENT_INDEX)"
+    return 1
+  fi
+  now=$(date +%s)
+  heartbeat=$(capture_status_value "$NATIVE_STATUS_FILE" heartbeat_epoch)
+  if [ -n "$heartbeat" ] && [ "$heartbeat" -gt 0 ] && [ $((now - heartbeat)) -gt "$HEARTBEAT_TIMEOUT_SECONDS" ]; then
+    log "WARNING: native capture heartbeat stale by $((now-heartbeat))s (session=$SESSION segment=$SEGMENT_INDEX)"
+    return 1
+  fi
+  sys_frames=$(capture_status_value "$NATIVE_STATUS_FILE" system_frames)
+  mic_frames=$(capture_status_value "$NATIVE_STATUS_FILE" microphone_frames)
+  total=$(( ${sys_frames:-0} + ${mic_frames:-0} ))
+  if [ "$total" -gt "$LAST_CAPTURE_FRAMES" ]; then
+    LAST_CAPTURE_FRAMES="$total"
+    LAST_CAPTURE_PROGRESS_EPOCH="$now"
+    return 0
+  fi
+  if [ "$LAST_CAPTURE_PROGRESS_EPOCH" -gt 0 ] && [ $((now - LAST_CAPTURE_PROGRESS_EPOCH)) -gt "$CAPTURE_STALL_SECONDS" ]; then
+    log "WARNING: native capture delivered no new frames for $((now-LAST_CAPTURE_PROGRESS_EPOCH))s (session=$SESSION segment=$SEGMENT_INDEX)"
+    return 1
+  fi
+  return 0
+}
+
+recover_capture() {
+  local platform="$1" reason="$2"
+  [ -n "$SESSION" ] || return 1
+  : > "$SESSION/recording_interrupted"
+  log "recovering native capture after $reason (session=$SESSION segment=$SEGMENT_INDEX pid=$FFPID)"
+  if [ -n "$FFPID" ]; then
+    kill -TERM "$FFPID" 2>/dev/null || true
+    wait "$FFPID" 2>/dev/null || true
+  fi
+  rm -f "$SESSION/active_capture.pid"
+  FFPID=""
+  resume_capture_segment "$platform"
 }
 
 merge_native_audio() {
-  local dir="$1" rebuilt="$dir/audio.wav"
-  [ -s "$dir/system_audio.caf" ] && [ -s "$dir/microphone_audio.caf" ] || {
-    log "ERROR: native audio channel file missing (session=$dir)"
+  local dir="$1" rebuilt="$dir/audio.wav" manifest="$dir/capture_segments.tsv"
+  local filter="" concat_refs="" seg_count=0 stream_index=0 idx sys mic status
+  local -a inputs=()
+
+  if [ ! -s "$manifest" ]; then
+    [ -s "$dir/system_audio.caf" ] && [ -s "$dir/microphone_audio.caf" ] || {
+      log "ERROR: native audio channel file missing (session=$dir)"
+      : > "$dir/audio_input_unhealthy"
+      return 1
+    }
+    ffmpeg -nostdin -y -hide_banner -loglevel error \
+      -i "$dir/system_audio.caf" -i "$dir/microphone_audio.caf" \
+      -filter_complex "[0:a]aresample=44100,pan=mono|c0=c0[system];[1:a]aresample=44100,pan=mono|c0=c0[mic];[system][mic]amerge=inputs=2[stereo]" \
+      -map "[stereo]" -ac 2 -ar 44100 -c:a pcm_s16le "$rebuilt" >> "$LOG" 2>&1 || {
+        log "ERROR: failed to merge native audio channels (session=$dir)"
+        : > "$dir/audio_input_unhealthy"
+        return 1
+      }
+    return 0
+  fi
+
+  while IFS=$'\t' read -r idx sys mic status; do
+    [ -n "$idx" ] || continue
+    if [ ! -s "$sys" ] || [ ! -s "$mic" ]; then
+      log "ERROR: capture segment $idx is missing a source channel (session=$dir)"
+      : > "$dir/recording_incomplete"
+      : > "$dir/audio_input_unhealthy"
+      return 1
+    fi
+    inputs+=("-i" "$sys" "-i" "$mic")
+    seg_count=$((seg_count + 1))
+    filter+="[${stream_index}:a]aresample=44100,pan=mono|c0=c0[system${seg_count}];"
+    filter+="[$((stream_index+1)):a]aresample=44100,pan=mono|c0=c0[mic${seg_count}];"
+    filter+="[system${seg_count}][mic${seg_count}]amerge=inputs=2[seg${seg_count}];"
+    concat_refs+="[seg${seg_count}]"
+    stream_index=$((stream_index + 2))
+  done < "$manifest"
+
+  [ "$seg_count" -gt 0 ] || {
+    log "ERROR: no valid capture segments (session=$dir)"
     : > "$dir/audio_input_unhealthy"
     return 1
   }
+  if [ "$seg_count" -eq 1 ]; then
+    filter+="[seg1]anull[out]"
+  else
+    filter+="${concat_refs}concat=n=${seg_count}:v=0:a=1[out]"
+  fi
+
   ffmpeg -nostdin -y -hide_banner -loglevel error \
-    -i "$dir/system_audio.caf" -i "$dir/microphone_audio.caf" \
-    -filter_complex "[0:a]aresample=44100,pan=mono|c0=c0[system];[1:a]aresample=44100,pan=mono|c0=c0[mic];[system][mic]amerge=inputs=2[stereo]" \
-    -map "[stereo]" -ac 2 -ar 44100 -c:a pcm_s16le "$rebuilt" >> "$LOG" 2>&1 || {
-      log "ERROR: failed to merge native audio channels (session=$dir)"
+    "${inputs[@]}" -filter_complex "$filter" -map "[out]" \
+    -ac 2 -ar 44100 -c:a pcm_s16le "$rebuilt" >> "$LOG" 2>&1 || {
+      log "ERROR: failed to merge/concatenate native audio segments (session=$dir)"
       : > "$dir/audio_input_unhealthy"
       return 1
     }
