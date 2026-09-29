@@ -197,13 +197,18 @@ final class AudioWriter: NSObject, SCStreamOutput {
     }
 }
 
-final class NativeCapture {
+final class NativeCapture: NSObject, SCStreamDelegate {
     private let systemURL: URL
     private let microphoneURL: URL
     private let statusURL: URL
     private var stream: SCStream?
     private var systemWriter: AudioWriter?
     private var microphoneWriter: AudioWriter?
+    private var heartbeatTimer: DispatchSourceTimer?
+    private let statusLock = NSLock()
+    private let stateLock = NSLock()
+    private var runtimeError: String?
+    var onUnexpectedStop: ((Error) -> Void)?
 
     private let systemQueue = DispatchQueue(
         label: "physics-class-system-audio"
@@ -219,11 +224,56 @@ final class NativeCapture {
     }
 
     private func writeStatus(_ value: String) {
+        statusLock.lock()
+        defer { statusLock.unlock() }
         try? (value + "\n").write(
             to: statusURL,
             atomically: true,
             encoding: .utf8
         )
+    }
+
+    private func currentRuntimeError() -> String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return runtimeError
+    }
+
+    private func runningStatus() -> String {
+        let system = systemWriter?.stats()
+        let microphone = microphoneWriter?.stats()
+        return [
+            "ready",
+            "heartbeat_epoch=\(Int(Date().timeIntervalSince1970))",
+            "system_frames=\(system?.receivedFrames ?? 0)",
+            "system_buffers=\(system?.sampleBuffers ?? 0)",
+            "system_estimated_duration=\(system?.estimatedDuration ?? 0)",
+            "microphone_frames=\(microphone?.receivedFrames ?? 0)",
+            "microphone_buffers=\(microphone?.sampleBuffers ?? 0)",
+            "microphone_estimated_duration=\(microphone?.estimatedDuration ?? 0)",
+            "runtime_error=\(currentRuntimeError() ?? "none")",
+        ].joined(separator: "\n")
+    }
+
+    private func startHeartbeat() {
+        let timer = DispatchSource.makeTimerSource(
+            queue: DispatchQueue.global(qos: .utility)
+        )
+        timer.schedule(deadline: .now() + 1, repeating: 10)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.writeStatus(self.runningStatus())
+        }
+        timer.resume()
+        heartbeatTimer = timer
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        stateLock.lock()
+        runtimeError = String(describing: error)
+        stateLock.unlock()
+        writeStatus("error: runtime stream stopped: \(error)")
+        onUnexpectedStop?(error)
     }
 
     private func microphoneAuthorized() async -> Bool {
@@ -303,7 +353,7 @@ final class NativeCapture {
         let stream = SCStream(
             filter: filter,
             configuration: configuration,
-            delegate: nil
+            delegate: self
         )
         try stream.addStreamOutput(
             systemWriter,
@@ -320,11 +370,14 @@ final class NativeCapture {
         self.systemWriter = systemWriter
         self.microphoneWriter = microphoneWriter
         self.stream = stream
-        writeStatus("ready")
+        writeStatus(runningStatus())
+        startHeartbeat()
         print("native audio capture started")
     }
 
     func stop() async {
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
         try? await stream?.stopCapture()
 
         // stopCapture stops delivery, but callbacks already queued on our
@@ -388,6 +441,7 @@ final class NativeCapture {
             "microphone_first_pts=\(microphone.firstPTS.map { String($0) } ?? "none")",
             "microphone_last_pts=\(microphone.lastPTS.map { String($0) } ?? "none")",
             "microphone_write_error=\(microphone.lastWriteError ?? "none")",
+            "runtime_error=\(currentRuntimeError() ?? "none")",
         ].joined(separator: "\n")
         writeStatus(status)
 
@@ -399,9 +453,9 @@ final class NativeCapture {
     }
 }
 
-guard CommandLine.arguments.count == 4 else {
+guard CommandLine.arguments.count == 4 || CommandLine.arguments.count == 5 else {
     fputs(
-        "usage: capture_native_audio SYSTEM.caf MICROPHONE.caf STATUS_FILE\n",
+        "usage: capture_native_audio SYSTEM.caf MICROPHONE.caf STATUS_FILE [MAX_SECONDS]\n",
         stderr
     )
     exit(2)
@@ -415,6 +469,27 @@ let capture = NativeCapture(
 let semaphore = DispatchSemaphore(value: 0)
 let stopLock = NSLock()
 var stopping = false
+
+let requestStop: () -> Void = {
+    stopLock.lock()
+    let shouldStop = !stopping
+    if shouldStop {
+        stopping = true
+    }
+    stopLock.unlock()
+    guard shouldStop else { return }
+
+    Task {
+        await capture.stop()
+        semaphore.signal()
+    }
+}
+
+capture.onUnexpectedStop = { error in
+    fputs("native audio stream stopped unexpectedly: \(error)\n", stderr)
+    requestStop()
+}
+
 let signalSources = [SIGINT, SIGTERM].map { signalNumber in
     let source = DispatchSource.makeSignalSource(
         signal: signalNumber,
@@ -422,21 +497,26 @@ let signalSources = [SIGINT, SIGTERM].map { signalNumber in
     )
     signal(signalNumber, SIG_IGN)
     source.setEventHandler {
-        stopLock.lock()
-        let shouldStop = !stopping
-        if shouldStop {
-            stopping = true
-        }
-        stopLock.unlock()
-        guard shouldStop else { return }
-
-        Task {
-            await capture.stop()
-            semaphore.signal()
-        }
+        requestStop()
     }
     source.resume()
     return source
+}
+
+var maxDurationSource: DispatchSourceTimer?
+if CommandLine.arguments.count == 5,
+   let maxSeconds = Double(CommandLine.arguments[4]),
+   maxSeconds > 0 {
+    let timer = DispatchSource.makeTimerSource(
+        queue: DispatchQueue.global(qos: .utility)
+    )
+    timer.schedule(deadline: .now() + maxSeconds)
+    timer.setEventHandler {
+        fputs("native audio capture reached hard duration limit\n", stderr)
+        requestStop()
+    }
+    timer.resume()
+    maxDurationSource = timer
 }
 
 Task {
@@ -453,3 +533,4 @@ Task {
     }
 }
 semaphore.wait()
+maxDurationSource?.cancel()
