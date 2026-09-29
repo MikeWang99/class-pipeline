@@ -221,6 +221,7 @@ final class NativeCapture: NSObject, SCStreamDelegate {
         self.systemURL = systemURL
         self.microphoneURL = microphoneURL
         self.statusURL = statusURL
+        super.init()
     }
 
     private func writeStatus(_ value: String) {
