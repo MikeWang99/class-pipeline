@@ -38,9 +38,19 @@ class TriggerTests(unittest.TestCase):
             profile,ctx=make_context(root); context=session/"postclass-context.json"; context.write_text(json.dumps(ctx),encoding="utf-8")
             feedback=root/"feedback.md"; feedback.write_text(feedback_text(),encoding="utf-8"); review=root/"review.md"; review.write_text("review",encoding="utf-8")
             (session/"ai_completed.txt").write_text(f"formal_feedback: {feedback}\nstudent_profile: {profile}\nteacher_review: {review}\npostclass_context: {context}\n",encoding="utf-8")
-            for name in ("audio.wav","system_audio.caf","microphone_audio.caf"):(session/name).write_bytes(b"source")
+            for name in ("audio.wav","system_audio.caf","microphone_audio.caf","system_audio.part02.caf","microphone_audio.part02.caf"):(session/name).write_bytes(b"source")
             subprocess.run(["bash",str(SCRIPT),str(session),str(material)],check=True,capture_output=True,text=True)
-            self.assertFalse((session/"audio.wav").exists()); self.assertTrue((session/"audio_deleted.txt").exists())
+            self.assertFalse((session/"audio.wav").exists()); self.assertFalse((session/"system_audio.part02.caf").exists()); self.assertFalse((session/"microphone_audio.part02.caf").exists()); self.assertTrue((session/"audio_deleted.txt").exists())
+    def test_recording_incomplete_never_triggers_ai(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); session=root/"2026-09-29_120000"; session.mkdir(); material=root/"materials.md"; self.material(material)
+            (session/"recording_incomplete").touch(); (session/"audio.wav").write_bytes(b"source")
+            env=os.environ.copy(); env["TRIGGER_POSTCLASS_AI_DRY_RUN"]="1"
+            r=subprocess.run(["bash",str(SCRIPT),str(session),str(material)],check=True,env=env,capture_output=True,text=True)
+            self.assertNotIn("would trigger Codex",r.stdout)
+            self.assertFalse((session/".ai_trigger.pid").exists())
+            self.assertTrue((session/"audio.wav").exists())
+
     def test_incomplete_marker_does_not_count_as_complete(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); session=root/"2026-08-28_120000"; session.mkdir(); material=root/"materials.md"; self.material(material)
