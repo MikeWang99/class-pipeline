@@ -42,6 +42,18 @@ class PostclassQueueTests(unittest.TestCase):
             self.assertIn("status: 待人工确认录音",text)
             self.assertIn("transcript_quality: audio_capture_degraded_system_audio_missing",text)
             self.assertIn("不得生成正式家长反馈",text)
+    def test_incomplete_recording_forces_manual_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); session=root/"2026-09-29_120000"; session.mkdir(); vault=self.make_vault(root)
+            (session/"transcript.txt").write_text("[00:01] first half\n[20:00] recording stopped early\n",encoding="utf-8")
+            (session/"recording_incomplete").touch()
+            (vault/"上课记录"/"学生档案"/"Eden.md").write_text("# Eden",encoding="utf-8")
+            subprocess.run(["bash",str(SCRIPT),str(session),str(vault),"AP","Eden"],check=True,env=self.confirmed_env(),capture_output=True,text=True)
+            material=vault/"上课记录"/"课后反馈草稿"/"2026-09-29-Eden-feedback-materials.md"
+            text=material.read_text(encoding="utf-8")
+            self.assertIn("status: 待人工确认录音",text)
+            self.assertIn("transcript_quality: recording_incomplete",text)
+
     def test_previous_feedback_uses_latest_date(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); session=root/"2026-08-28_120000"; session.mkdir(); vault=self.make_vault(root)

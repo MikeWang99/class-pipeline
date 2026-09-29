@@ -1,5 +1,5 @@
 {
-  "skill_version": "2.3.3",
+  "skill_version": "2.4.0",
   "vault_path": "/absolute/path/to/your/Obsidian Vault",
   "recordings_dir": "/Users/yourname/physics-class-pipeline-data",
   "calendar_keyword": "Class",
@@ -8,5 +8,14 @@
   "transcribe_backend": "local",
   "whisper_cli": "~/.local/Homebrew/bin/whisper-cli",
   "whisper_model": "~/.cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin",
-  "transcribe_language": "auto"
+  "transcribe_language": "auto",
+  "recording_backend": "native_system_and_microphone",
+  "max_recording_minutes": 150,
+  "min_free_disk_gb": 8,
+  "critical_free_disk_gb": 3,
+  "capture_stall_seconds": 180,
+  "capture_heartbeat_timeout_seconds": 45,
+  "max_capture_restarts": 3,
+  "recording_min_completeness_ratio": 0.97,
+  "recording_gap_tolerance_seconds": 60
 }

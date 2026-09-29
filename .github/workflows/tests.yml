@@ -1,0 +1,32 @@
+name: Class Pipeline Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python-and-shell:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Ensure ffmpeg
+        run: |
+          command -v ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+      - name: Shell syntax
+        run: |
+          bash -n setup.sh uninstall.sh scripts/*.sh
+      - name: Python tests
+        run: |
+          python -m unittest discover -s tests -p "test_*.py"
+
+  swift-capture:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile native ScreenCaptureKit helper
+        run: |
+          swiftc scripts/capture_native_audio.swift -o "$RUNNER_TEMP/PhysicsClassAudio"

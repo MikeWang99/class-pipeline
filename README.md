@@ -5,7 +5,7 @@
 | 阶段 | 行为 | 触发方式 |
 |---|---|---|
 | 课前 | 扫描明天日历，为每节课生成备课笔记骨架（含学生档案摘要、上次反馈），由装了 Skill 的 AI 补全教学目标与流程 | launchd 每日 10:00 自动 + 说「备课」 |
-| 课中 | 检测到会议（Zoom/腾讯会议/钉钉/飞书/Google Meet）自动录音，散会后使用本地 Whisper large-v3-turbo 转写全员文字稿；文字稿生成成功后自动删除原始 audio.wav | 常驻后台，全自动 |
+| 课中 | 检测到会议后自动录系统声+麦克风；单次硬上限 150 分钟，带磁盘保护、heartbeat/帧进度监控和同 session 分段自恢复；散会后拼接并用本地 Whisper large-v3-turbo 转写 | 常驻后台，全自动 |
 | 课后 | 用 transcript-aware final match 确认学生身份，先建立 evidence-grounded `postclass-context.json`，再生成家长反馈、更新学生档案和教师教学优化复盘 | 后台自动 + AI 事件触发/失败补偿 |
 
 所有产出写入 Obsidian Vault 的「上课记录」分区：`备课内容 / 课堂文字稿 / 课后反馈 / 学生档案 / 教学优化`。
@@ -65,6 +65,10 @@ scripts/
 开课和散会提醒同时使用通知横幅与 8 秒自动关闭的可见对话框，避免 macOS 静默抑制横幅时没有任何提示。可随时运行 `bash scripts/meeting_watcher.sh notify-test` 验证弹窗链路。
 
 音频采集使用 macOS 原生 ScreenCaptureKit，同时捕获系统播放声和麦克风，不需要 BlackHole、Multi-Output 或手动切换会议 App 的扬声器设备。
+
+v2.4 的录音安全策略默认是：最多 150 分钟；开始录音建议至少保留 8 GB 可用空间；录制中若跌到 3 GB 以下则提前停止。原生 helper 每 10 秒写 heartbeat，watcher 同时检查帧是否持续增长；发生 ScreenCaptureKit 运行时错误或明显断流时，会在同一个 session 中启动下一段并在课后按顺序合并。若最终音频仍明显短于课堂墙钟时长，则写入 `recording_incomplete`，只允许保留/诊断/部分转写，不允许自动生成正式反馈或更新学生档案。
+
+当前会议检测是保守型启发式：原生会议客户端只要进程仍存在、或 Google Meet 标签页仍保留，就可能继续被判断为“会议中”。因此 150 分钟 hard stop 是独立于会议检测的最终保险；达到上限后，本次会议在真正消失前不会再次启动录音。
 
 课程身份现在采用两阶段确认：录音开始时的匹配只算 provisional；如果附近有多节紧邻课程就不会提前锁学生。完整转写后，Pipeline 会用文字稿第一段有效课堂语音对应的实际时间重新做 final match，因此“第一节取消、第二节实际开课”不会再沿用第一节的早期身份。随后 `scripts/trigger_postclass_ai.sh` 事件式启动本机 Codex，先完整读取本节文字稿 + 当前学生档案 + 最近反馈（以及可用的上一节文字稿/本次备课），建立并验证 `postclass-context.json`，再依次生成家长反馈、更新档案并生成教学优化复盘。这不是定时轮询；每天 10:00 的 Codex 自动任务仅作为失败重试与次日备课入口。
 
